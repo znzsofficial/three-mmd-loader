@@ -21,6 +21,7 @@ function makeFakeModule() {
   let resetCount = 0;
   let settleCount = 0;
   let contactCount = 0;
+  let contactWriter: ((outContacts: number, capacity: number) => void) | undefined;
   let stepHook: (() => void) | undefined;
   const stepCalls: Array<[number, number, number]> = [];
   const setBodyCalls: Array<{ index: number; position: [number, number, number] }> = [];
@@ -81,6 +82,10 @@ function makeFakeModule() {
       contactCalls.push({ outContacts, capacity });
       heapU32[outCount >>> 2] = contactCount;
       if (outContacts !== 0 && capacity > 0) {
+        if (contactWriter) {
+          contactWriter(outContacts, capacity);
+          return 0;
+        }
         const heapI32 = new Int32Array(buffer);
         const base = outContacts >>> 2;
         heapI32[base] = 3;
@@ -112,6 +117,7 @@ function makeFakeModule() {
     get resetCount() { return resetCount; },
     get settleCount() { return settleCount; },
     setContactCount(count: number) { contactCount = count; },
+    setContactWriter(writer: ((outContacts: number, capacity: number) => void) | undefined) { contactWriter = writer; },
     setStepHook(hook: (() => void) | undefined) { stepHook = hook; }
   };
 }
@@ -154,6 +160,33 @@ describe("mmd-anim Bullet physics backend", () => {
 
     expect(backend.debugContactCount?.()).toBe(0);
     expect(backend.debugPhysicsContacts?.()).toEqual([]);
+  });
+
+  it("filters contacts to a rigid-body range and reuses the native contact buffer", () => {
+    const fake = makeFakeModule();
+    const backend = createCustomBulletMmdPhysicsBackend(fake.module);
+    const heap = fake.module.HEAPF32;
+    if (!heap) throw new Error("Expected fake module HEAPF32.");
+    const heapI32 = new Int32Array(heap.buffer);
+    const contactCount = 300;
+    fake.setContactCount(contactCount);
+    fake.setContactWriter((outContacts, capacity) => {
+      for (let index = 0; index < Math.min(capacity, contactCount); index += 1) {
+        const base = (outContacts + index * 48) >>> 2;
+        heapI32[base] = index === contactCount - 1 ? 0 : 1;
+        heapI32[base + 1] = index === contactCount - 1 ? 343 : 2;
+      }
+    });
+
+    expect(backend.debugPhysicsContactsForRigidBodyRange(343, 2)).toEqual([
+      expect.objectContaining({ rigidBodyIndexA: 0, rigidBodyIndexB: 343 })
+    ]);
+    expect(backend.debugPhysicsContactsForRigidBodyRange(343, 2)).toHaveLength(1);
+
+    const populatedCalls = fake.contactCalls.filter(({ outContacts }) => outContacts !== 0);
+    expect(populatedCalls).toHaveLength(2);
+    expect(populatedCalls[0]?.capacity).toBe(contactCount);
+    expect(populatedCalls[1]?.outContacts).toBe(populatedCalls[0]?.outContacts);
   });
 
   it("uploads rotations in the native Bullet ZYX encoding", () => {

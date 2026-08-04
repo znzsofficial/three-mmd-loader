@@ -33,6 +33,7 @@ export type CustomBulletMmdModule = MmdAnimBulletModule;
 export interface CustomBulletMmdPhysicsBackend extends MmdDirectBufferPhysicsBackend {
   debugContactCount(): number;
   debugPhysicsContacts(): readonly MmdAnimBulletContactPoint[];
+  debugPhysicsContactsForRigidBodyRange(firstRigidBodyIndex: number, rigidBodyCount: number): readonly MmdAnimBulletContactPoint[];
 }
 
 type CustomBulletMmdFactory = (
@@ -141,5 +142,9 @@ class CustomBulletMmdCompatibilityBackend implements CustomBulletMmdPhysicsBacke
 
   debugPhysicsContacts(): readonly MmdAnimBulletContactPoint[] {
     return this.backend.debugPhysicsContacts();
+  }
+
+  debugPhysicsContactsForRigidBodyRange(firstRigidBodyIndex: number, rigidBodyCount: number): readonly MmdAnimBulletContactPoint[] {
+    return this.backend.debugPhysicsContactsForRigidBodyRange(firstRigidBodyIndex, rigidBodyCount);
   }
 }
