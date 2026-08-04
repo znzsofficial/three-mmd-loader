@@ -57,6 +57,7 @@ export interface MmdAnimBulletContactPoint {
 export interface MmdAnimBulletPhysicsBackend extends MmdPhysicsBackend {
   debugContactCount(): number;
   debugPhysicsContacts(): readonly MmdAnimBulletContactPoint[];
+  debugPhysicsContactsForRigidBodyRange(firstRigidBodyIndex: number, rigidBodyCount: number): readonly MmdAnimBulletContactPoint[];
 }
 
 export function createMmdAnimBulletPhysicsBackend(
@@ -185,6 +186,14 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
   }
 
   debugPhysicsContacts(): readonly MmdAnimBulletContactPoint[] {
+    return this.collectPhysicsContacts();
+  }
+
+  debugPhysicsContactsForRigidBodyRange(firstRigidBodyIndex: number, rigidBodyCount: number): readonly MmdAnimBulletContactPoint[] {
+    return this.collectPhysicsContacts(firstRigidBodyIndex, rigidBodyCount);
+  }
+
+  private collectPhysicsContacts(firstRigidBodyIndex = 0, rigidBodyCount = -1): readonly MmdAnimBulletContactPoint[] {
     const collect = this.module._mmd_anim_bullet_world_collect_contacts;
     const count = this.debugContactCount();
     if (!collect || count <= 0) return [];
@@ -203,11 +212,18 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
       this.contactBufferCapacity
     );
     const contacts: MmdAnimBulletContactPoint[] = [];
+    const rangeEnd = firstRigidBodyIndex + rigidBodyCount;
     for (let index = 0; index < written; index += 1) {
       const base = (this.contactBufferPointer + index * CONTACT_POINT_BYTES) >>> 2;
+      const rigidBodyIndexA = heapI32[base] ?? -1;
+      const rigidBodyIndexB = heapI32[base + 1] ?? -1;
+      if (rigidBodyCount >= 0 && !(
+        (rigidBodyIndexA >= firstRigidBodyIndex && rigidBodyIndexA < rangeEnd) ||
+        (rigidBodyIndexB >= firstRigidBodyIndex && rigidBodyIndexB < rangeEnd)
+      )) continue;
       contacts.push({
-        rigidBodyIndexA: heapI32[base] ?? -1,
-        rigidBodyIndexB: heapI32[base + 1] ?? -1,
+        rigidBodyIndexA,
+        rigidBodyIndexB,
         distance: heap[base + 2] ?? 0,
         positionWorldOnA: [heap[base + 3] ?? 0, heap[base + 4] ?? 0, heap[base + 5] ?? 0],
         positionWorldOnB: [heap[base + 6] ?? 0, heap[base + 7] ?? 0, heap[base + 8] ?? 0],
