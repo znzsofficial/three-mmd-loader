@@ -45,7 +45,7 @@ import { MMD_SELF_SHADOW_LAYER } from "./shadow.js";
 import { createThreeSkeleton } from "./skeleton.js";
 import type { ModelSource } from "./modelSource.js";
 import type { ModelSourceDiagnostic, ModelSourceFetch } from "./modelSource.js";
-import type { TextureMap, TextureResolver } from "./textures.js";
+import type { LocalPngAlphaTiles, TextureMap, TextureResolver } from "./textures.js";
 export { createThreeBufferGeometry, createThreeMorphSplitGeometries } from "./geometry.js";
 export type { ThreeMmdGeometryOptions } from "./geometry.js";
 export { applyMmdCameraStateToThreeCamera } from "./camera.js";
@@ -199,6 +199,8 @@ export interface ThreeMmdLoaderOptions {
   readonly ddsLoader?: ThreeMmdTextureLoader;
   /** Enables geometry-aware texture alpha checks. Defaults to off, except when outlines require it internally. */
   readonly geometryAwareAlpha?: boolean;
+  /** Cache the exact UV sampling lattice by local PNG File identity and dimensions. */
+  readonly localPngAlphaTiles?: LocalPngAlphaTiles;
   /** Options forwarded to the per-model runtime. */
   readonly runtime?: DefaultMmdRuntimeOptions;
   /** Creates a per-model runtime. When omitted, the bundled mmd-anim runtime is used for PMX. */
@@ -283,6 +285,8 @@ export interface ThreeMmdModel {
   readonly renderOrderMeshes: readonly THREE.SkinnedMesh[];
   /** Runtime bound to this model. */
   readonly runtime: MmdRuntime;
+  /** Swap the evaluator used by all model methods, returning the previous one to its owner. */
+  exchangeRuntime(next: MmdRuntime): MmdRuntime;
   readonly source: ThreeMmdModelSourceDescriptor;
   /** Structured diagnostics grouped by subsystem. */
   readonly diagnostics: {
@@ -397,8 +401,10 @@ export class ThreeMmdLoader {
           geometry: mesh.geometry,
           morphs: modelData.morphs,
           geometryAwareAlpha: this.options.geometryAwareAlpha || effectiveOutlines,
+          localPngAlphaTiles: this.options.localPngAlphaTiles,
           materialDiagnostics,
-          textureCache: this.textureCache
+          // Default textures are owned and disposed by one model, never a sibling.
+          textureCache: this.options.textureLoader ? this.textureCache : new Map()
         });
         const textureDiagnostics = await texturePromise;
         profile?.mark("textures");
@@ -455,6 +461,11 @@ export class ThreeMmdLoader {
     } finally {
       profile?.clear();
     }
+  }
+
+  async createDetachedRuntime(context: ThreeMmdRuntimeFactoryContext): Promise<MmdRuntime> {
+    await this.getCore();
+    return this.createRuntime(context);
   }
 
   private createRuntime(context: ThreeMmdRuntimeFactoryContext): MmdRuntime {
@@ -671,7 +682,7 @@ export class ThreeMmdLoader {
 
 function createThreeMmdModel(options: {
   readonly mesh: THREE.SkinnedMesh;
-  readonly runtime: MmdRuntime;
+  runtime: MmdRuntime;
   readonly source: ThreeMmdModelSourceDescriptor;
   readonly sourceDiagnostic: ModelSourceDiagnostic;
   readonly coreDiagnostic: ThreeMmdCoreDiagnostic;
@@ -728,7 +739,12 @@ function createThreeMmdModel(options: {
     mesh: options.mesh,
     outlineMeshes,
     renderOrderMeshes,
-    runtime: options.runtime,
+    get runtime() { return options.runtime; },
+    exchangeRuntime(next) {
+      const previous = options.runtime;
+      options.runtime = next;
+      return previous;
+    },
     source: options.source,
     diagnostics: {
       core: options.coreDiagnostic,

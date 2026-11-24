@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { syncRenderPalettes } from "./syncRenderPalettes.js";
 import { validateMorphOverrides } from "./morphOverrides.js";
 import type { CameraState, LightState, MmdAnimation } from "../parser/model/modelTypes.js";
 import { writeBonePhysicsToggleBuffer } from "../physics/legacyPhysicsBridge.js";
@@ -20,7 +21,6 @@ import type { SolvePreparedIkScratch } from "./ik-bridge.js";
 import { CcdIkSolver } from "./ik/index.js";
 import type { CcdIkPreparedChain } from "./ik/index.js";
 import {
-  copyNumbersToFloat32Scratch,
   ensureFloat32ArrayLength,
   normalizeFrameRate,
   prepareQuaternionScratchArray,
@@ -30,7 +30,7 @@ import {
   writeVector3ToBuffer
 } from "./math.js";
 import { syncMorphSplitTargetInfluences } from "./morphSplitSync.js";
-import { StatefulSpringPhysicsSimulation, applyPhysicsOutputToSkeleton, captureRuntimeDebugStageInto, cloneDebugStage, createEmptyDebugStages, createPhysicsResetContext, createPrePhysicsInputBuffersIfNeeded, extractMmdWorldMatricesInto, mergePhysicsOutputDeltas, readRuntimeExternalPhysics, readRuntimePhysics } from "./physics.js";
+import { StatefulSpringPhysicsSimulation, applyPhysicsOutputToSkeleton, captureRuntimeDebugStageInto, cloneDebugStage, createEmptyDebugStages, createPhysicsResetContext, createPrePhysicsInputBuffersIfNeeded, mergePhysicsOutputDeltas, readRuntimeExternalPhysics, readRuntimePhysics } from "./physics.js";
 import type { PrePhysicsScratch } from "./physics.js";
 import type { DefaultMmdRuntimeOptions, MmdFrameState, MmdRuntime, MmdRuntimeDebugState, MmdRuntimeEvaluateOptions, MmdRuntimeTickOptions, RuntimeExternalPhysicsData, RuntimeRestTransform } from "./types.js";
 import { readMmdBoneUserData, readMmdMeshRuntimeData } from "./userData.js";
@@ -44,6 +44,9 @@ type MutableFrameState = {
 const mmdMatrixAxisSigns = [1, 1, -1, 1] as const;
 
 export class DefaultMmdRuntime implements MmdRuntime {
+  private readonly captureStageSnapshots: boolean;
+  private readonly coalescePhysicsWorldUpdates: boolean;
+  private readonly onPhysicsPoseWork: DefaultMmdRuntimeOptions["onPhysicsPoseWork"];
   private readonly frameRate: number;
   private readonly ikSolver = new CcdIkSolver();
   private mesh: THREE.SkinnedMesh | undefined;
@@ -124,8 +127,7 @@ export class DefaultMmdRuntime implements MmdRuntime {
     outputRotations: new Float32Array(0),
     outputWorldMatricesColumnMajor: new Float32Array(0),
     updatedBoneIndices: [] as number[],
-    bonePhysicsToggleBuffer: new Uint8Array(0),
-    worldMatricesColumnMajorNumbers: [] as number[]
+    bonePhysicsToggleBuffer: new Uint8Array(0)
   };
   private readonly scratchPrePhysics: PrePhysicsScratch = {
     preTranslations: new Float32Array(0),
@@ -143,6 +145,9 @@ export class DefaultMmdRuntime implements MmdRuntime {
   };
 
   constructor(options: DefaultMmdRuntimeOptions = {}) {
+    this.captureStageSnapshots = options.captureStageSnapshots !== false;
+    this.coalescePhysicsWorldUpdates = options.coalescePhysicsWorldUpdates === true && !this.captureStageSnapshots;
+    this.onPhysicsPoseWork = options.onPhysicsPoseWork;
     this.frameRate = normalizeFrameRate(options.frameRate ?? 30);
     this.physicsMode = options.physics ?? "none";
     this.physicsBackend = options.physicsBackend;
@@ -150,25 +155,28 @@ export class DefaultMmdRuntime implements MmdRuntime {
   }
 
   evaluate(seconds: number, options?: MmdRuntimeEvaluateOptions): MmdFrameState {
+    const started = options?.physics !== false && this.onPhysicsPoseWork ? performance.now() : undefined;
     if (options?.morphOverrides) {
       const morphs = this.mesh ? readMmdMeshRuntimeData(this.mesh).mmdMorphs : undefined;
       validateMorphOverrides(options.morphOverrides,
         Array.isArray(morphs) ? morphs.length : this.mesh?.morphTargetInfluences?.length ?? 0);
     }
     const previousSeconds = this.state.seconds;
+    const defer = this.coalescePhysicsWorldUpdates && options?.physics !== false && this.externalPhysicsData &&
+      this.physicsBackend && !this.physicsBackend.disabled && !this.physicsBackend.disposed;
     writeFrameState(this.state, seconds, this.frameRate);
     if (this.mesh && (this.mmdAnimation || options?.morphOverrides || this.hadMorphOverrides)) {
       this.applyCurrentMmdAnimation(this.state.frame, options?.morphOverrides);
       this.updateCurrentIkStates(this.state.frame);
-      this.captureDebugStage("vmdInterpolation");
+      if (!defer) this.captureDebugStage("vmdInterpolation");
     }
     this.hadMorphOverrides = (options?.morphOverrides?.indices.length ?? 0) > 0;
     this.applyCurrentAppendTransforms();
-    this.captureDebugStage("appendTransform");
+    if (!defer) this.captureDebugStage("appendTransform");
     if (options?.ik !== false) {
-      this.solveIk();
+      this.solveIk(!defer);
     }
-    this.captureDebugStage("ik");
+    if (!defer) this.captureDebugStage("ik");
     if (options?.physics === false) {
       if (!this.physicsDisabled) {
         this.resetPhysicsState();
@@ -176,7 +184,7 @@ export class DefaultMmdRuntime implements MmdRuntime {
       this.physicsDisabled = true;
     } else {
       this.stepStatefulSpringPhysics();
-      this.stepExternalPhysics(previousSeconds);
+      this.stepExternalPhysics(previousSeconds, started);
       this.physicsDisabled = false;
     }
     this.mesh?.skeleton.update();
@@ -212,7 +220,7 @@ export class DefaultMmdRuntime implements MmdRuntime {
       evaluateOptions = meshOrOptions;
     }
     const state = this.evaluate(seconds, evaluateOptions);
-    syncRuntimeMeshForRender(mesh ?? undefined);
+    syncRenderPalettes(mesh ?? undefined);
     return state;
   }
 
@@ -387,10 +395,10 @@ export class DefaultMmdRuntime implements MmdRuntime {
     }
   }
 
-  private solveIk(): Set<number> {
+  private solveIk(propagate = true): Set<number> {
     const chains = this.currentEnabledIkChains();
     if (!this.hasHandTwistIkChain()) {
-      const sourceBoneIndices = solvePreparedIk(this.mesh, this.ikSolver, chains, this.scratchIk);
+      const sourceBoneIndices = solvePreparedIk(this.mesh, this.ikSolver, chains, this.scratchIk, propagate);
       this.reapplyCurrentAppendTransformsForSources(sourceBoneIndices);
       return sourceBoneIndices;
     }
@@ -403,7 +411,7 @@ export class DefaultMmdRuntime implements MmdRuntime {
         this.mesh,
         this.ikSolver,
         this.scratchSingleIkChain,
-        this.scratchIk
+        this.scratchIk, propagate
       );
       for (const index of chainSourceBoneIndices) {
         changedBoneIndices.add(index);
@@ -595,7 +603,7 @@ export class DefaultMmdRuntime implements MmdRuntime {
     }
   }
 
-  private stepExternalPhysics(previousSeconds: number): void {
+  private stepExternalPhysics(previousSeconds: number, started?: number): void {
     const mesh = this.mesh;
     const data = this.externalPhysicsData;
     const backend = this.physicsBackend;
@@ -603,6 +611,7 @@ export class DefaultMmdRuntime implements MmdRuntime {
       return;
     }
 
+    const prepareAt = started === undefined ? 0 : performance.now();
     mesh.updateWorldMatrix(false, true);
     const boneCount = mesh.skeleton.bones.length;
     const directBuffers = acquireDirectStepBuffersIfPossible(backend, data, boneCount);
@@ -647,13 +656,8 @@ export class DefaultMmdRuntime implements MmdRuntime {
         directBuffers.inputWorldMatricesColumnMajor
       );
     } else {
-      inputWorldMatricesColumnMajor = copyNumbersToFloat32Scratch(
-        extractMmdWorldMatricesInto(
-          mesh,
-          this.scratchExternalPhysicsInput.worldMatricesColumnMajorNumbers
-        ),
-        this.scratchExternalPhysicsInput.worldMatricesColumnMajor
-      );
+      const storage = ensureFloat32ArrayLength(this.scratchExternalPhysicsInput.worldMatricesColumnMajor, boneCount * 16);
+      inputWorldMatricesColumnMajor = extractMmdWorldMatricesIntoFloat32(mesh, storage);
       this.scratchExternalPhysicsInput.worldMatricesColumnMajor = inputWorldMatricesColumnMajor;
     }
     const prePhysics = createPrePhysicsInputBuffersIfNeeded(
@@ -738,7 +742,9 @@ export class DefaultMmdRuntime implements MmdRuntime {
       morphImpulses: data.morphImpulses
     };
 
+    const stepAt = started === undefined ? 0 : performance.now();
     const result = backend.step(context);
+    const writeAt = started === undefined ? 0 : performance.now();
     const updatedBoneCount = result.updatedBoneCount ?? context.output?.updatedBoneIndices?.length ?? 0;
     if (!result.simulated && updatedBoneCount === 0) {
       return;
@@ -753,6 +759,7 @@ export class DefaultMmdRuntime implements MmdRuntime {
       );
     }
     applyPhysicsOutputToSkeleton(mesh, context, updatedBoneCount);
+    if (started !== undefined) this.onPhysicsPoseWork?.(prepareAt - started, stepAt - prepareAt, writeAt - stepAt, performance.now() - writeAt);
   }
 
   private resetPhysicsState(): void {
@@ -762,6 +769,10 @@ export class DefaultMmdRuntime implements MmdRuntime {
 
   private captureDebugStage(stage: keyof MmdRuntimeDebugState["stages"]): void {
     const mesh = this.mesh;
+    if (!this.captureStageSnapshots) {
+      mesh?.updateWorldMatrix(false, true);
+      return;
+    }
     if (!mesh) {
       clearDebugStage(this.debugStages[stage]);
       return;
@@ -789,34 +800,8 @@ function findPropertyFrameIndex(
   return Math.max(0, high);
 }
 
-function syncRuntimeMeshForRender(mesh: THREE.Object3D | undefined): void {
-  if (!mesh) {
-    return;
-  }
-  // Keep renderer-facing world and bone matrices in sync after runtime evaluation.
-  mesh.updateMatrixWorld(true);
-  updateSkinnedMeshSkeletons(mesh);
-}
-
-function updateSkinnedMeshSkeletons(object: THREE.Object3D): void {
-  if (isSkinnedMesh(object)) {
-    object.skeleton.update();
-  }
-  const children = object.children;
-  for (let index = 0; index < children.length; index += 1) {
-    const child = children[index];
-    if (child) {
-      updateSkinnedMeshSkeletons(child);
-    }
-  }
-}
-
 function isObject3D(value: unknown): value is THREE.Object3D {
   return value instanceof THREE.Object3D || hasBooleanFlag(value, "isObject3D");
-}
-
-function isSkinnedMesh(value: THREE.Object3D): value is THREE.SkinnedMesh {
-  return value instanceof THREE.SkinnedMesh || hasBooleanFlag(value, "isSkinnedMesh");
 }
 
 function hasBooleanFlag(value: unknown, key: "isObject3D" | "isSkinnedMesh"): boolean {

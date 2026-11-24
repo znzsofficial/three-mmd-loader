@@ -23,6 +23,12 @@ export interface MmdToonTextureMaterial {
 
 export type MmdMaterialTransparencyMode = "opaque" | "alphaTest" | "alphaBlend";
 
+export interface LocalPngAlphaTiles {
+  get(file: File, width: number, height: number): Uint8Array | null | undefined;
+  set(file: File, width: number, height: number, tile: Uint8Array | null): void;
+}
+export type MaterialAlphaTiles = Map<HTMLImageElement, Uint8Array | null>;
+
 export interface MmdTextureAlphaEvaluationOptions {
   readonly alphaThreshold?: number;
   readonly alphaBlendThreshold?: number;
@@ -43,6 +49,7 @@ const bundledSharedToonTextureUrls: TextureMap = {
 
 let defaultToonGradientMap: THREE.DataTexture | undefined;
 const blobTextureCacheKeys = new WeakMap<Blob, number>();
+const pngSourceFiles = new WeakMap<THREE.Texture, File>();
 const blobTgaTextureCache = new WeakMap<Blob, Promise<THREE.DataTexture | undefined>>();
 let nextBlobTextureCacheKey = 1;
 
@@ -322,7 +329,8 @@ export function evaluateMmdTextureAlphaGeometry(
   texture: THREE.Texture,
   geometry: THREE.BufferGeometry,
   materialIndex: number,
-  options: MmdTextureAlphaEvaluationOptions = {}
+  options: MmdTextureAlphaEvaluationOptions & { localPngAlphaTiles?: LocalPngAlphaTiles } = {},
+  alphaTiles?: MaterialAlphaTiles
 ): MmdMaterialTransparencyMode | undefined {
   const metadataAlphaMode = texture.userData.mmdTextureAlphaMode as
     | MmdMaterialTransparencyMode
@@ -333,10 +341,6 @@ export function evaluateMmdTextureAlphaGeometry(
   const image = texture.image as
     | { data?: ArrayLike<number>; width?: number; height?: number }
     | undefined;
-  const rgba = readableRgbaTextureData(image);
-  if (!rgba || !hasAnyReadableAlpha(rgba.data, rgba.width, rgba.height)) {
-    return undefined;
-  }
   const uvAttribute = geometry.getAttribute("uv");
   if (!uvAttribute) {
     return undefined;
@@ -348,6 +352,29 @@ export function evaluateMmdTextureAlphaGeometry(
   const indexArray = geometry.index?.array;
   const stats = createAlphaStats();
   const resolution = 512;
+  // The rasterizer samples exactly the pixel centres of this lattice, not a
+  // filtered image. Cache only those original alpha texels (256 KiB per tile).
+  const share = alphaTiles && typeof HTMLImageElement !== "undefined" && image instanceof HTMLImageElement && image.complete;
+  let grid = share ? alphaTiles.get(image) : undefined;
+  const file = grid === undefined && share && options.localPngAlphaTiles ? pngSourceFiles.get(texture) : undefined;
+  if (file && share) grid = options.localPngAlphaTiles?.get(file, image.width, image.height);
+  let rgba: ArrayLike<number> = [], width = 0, height = 0;
+  if (grid === undefined) {
+    const pixels = readableRgbaTextureData(image);
+    if (!pixels) return undefined;
+    ({ data: rgba, width, height } = pixels);
+    const hasAlpha = hasAnyReadableAlpha(rgba, width, height);
+    if (share) {
+      grid = hasAlpha ? gatherAlphaTile(rgba, width, height, resolution) : null;
+      if (file) options.localPngAlphaTiles?.set(file, width, height, grid);
+      if (alphaTiles.size >= 8) {
+        const first = alphaTiles.keys().next();
+        if (!first.done) alphaTiles.delete(first.value);
+      }
+      alphaTiles.set(image, grid);
+    }
+    if (!hasAlpha) return undefined;
+  } else if (grid === null) return undefined;
   for (const group of groups) {
     for (let offset = group.start; offset < group.start + group.count; offset += 3) {
       const a = Number(indexArray?.[offset] ?? offset);
@@ -355,16 +382,16 @@ export function evaluateMmdTextureAlphaGeometry(
       const c = Number(indexArray?.[offset + 2] ?? offset + 2);
       recordRasterizedUvTriangleAlpha(
         stats,
-        rgba.data,
-        rgba.width,
-        rgba.height,
+        rgba,
+        width,
+        height,
         uvAttribute.getX(a),
         uvAttribute.getY(a),
         uvAttribute.getX(b),
         uvAttribute.getY(b),
         uvAttribute.getX(c),
         uvAttribute.getY(c),
-        resolution
+        resolution, grid
       );
     }
   }
@@ -950,6 +977,9 @@ async function loadResolvedTextureUncached(
           configureMmdTexture(texture, textureInfo);
           if (!textureLoader) {
             texture.userData.mmdTextureOwnership = "loader";
+            if (typeof File !== "undefined" && resolved instanceof File && /\.png$/i.test(texturePath) && /\.png$/i.test(resolved.name)) {
+              pngSourceFiles.set(texture, resolved);
+            }
           }
           if (request.alphaMode) {
             texture.userData.mmdTextureAlphaMode = request.alphaMode;
@@ -1275,6 +1305,17 @@ function sampleRgbaAlphaByUv(
   return rgba[(y * width + x) * 4 + 3] ?? 255;
 }
 
+function gatherAlphaTile(rgba: ArrayLike<number>, width: number, height: number, resolution: number): Uint8Array {
+  const tile = new Uint8Array(resolution * resolution);
+  const xOffsets = new Uint32Array(resolution);
+  for (let x = 0; x < resolution; x++) xOffsets[x] = (Math.round((x + .5) / resolution * width) % width) * 4 + 3;
+  for (let y = 0; y < resolution; y++) {
+    const row = (Math.round((y + .5) / resolution * height) % height) * width * 4;
+    for (let x = 0; x < resolution; x++) tile[y * resolution + x] = rgba[row + xOffsets[x]];
+  }
+  return tile;
+}
+
 function recordRasterizedUvTriangleAlpha(
   stats: AlphaStats,
   rgba: ArrayLike<number>,
@@ -1286,7 +1327,8 @@ function recordRasterizedUvTriangleAlpha(
   uvBY: number,
   uvCX: number,
   uvCY: number,
-  resolution: number
+  resolution: number,
+  grid?: Uint8Array | null
 ): void {
   const minU = Math.min(uvAX, uvBX, uvCX);
   const maxU = Math.max(uvAX, uvBX, uvCX);
@@ -1309,7 +1351,7 @@ function recordRasterizedUvTriangleAlpha(
         uvBY + shiftV,
         uvCX + shiftU,
         uvCY + shiftV,
-        resolution
+        resolution, grid
       );
     }
   }
@@ -1326,7 +1368,8 @@ function recordRasterizedUvTriangleAlphaTile(
   uvBY: number,
   uvCX: number,
   uvCY: number,
-  resolution: number
+  resolution: number,
+  grid?: Uint8Array | null
 ): void {
   const ax = uvAX * resolution;
   const ay = uvAY * resolution;
@@ -1353,7 +1396,7 @@ function recordRasterizedUvTriangleAlphaTile(
       const wB = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / denominator;
       const wC = 1 - wA - wB;
       if (wA >= 0 && wB >= 0 && wC >= 0) {
-        recordAlphaSample(stats, sampleRgbaAlphaByUv(rgba, width, height, px / resolution, py / resolution));
+        recordAlphaSample(stats, grid ? grid[y * resolution + x] : sampleRgbaAlphaByUv(rgba, width, height, px / resolution, py / resolution));
       }
     }
   }

@@ -131,6 +131,12 @@ export interface MmdRuntimeAsyncTickOptions extends MmdRuntimeTickOptions {
 }
 
 export interface DefaultMmdRuntimeOptions {
+  /** JS runtime only: false skips copying the intermediate debugging snapshots. */
+  readonly captureStageSnapshots?: boolean;
+  /** Defer intermediate matrix propagation to the external physics barrier when snapshots are off. */
+  readonly coalescePhysicsWorldUpdates?: boolean;
+  /** Non-overlapping wall times for a completed external physics evaluation. */
+  readonly onPhysicsPoseWork?: (animationIkMs: number, prepareMs: number, backendMs: number, writeBackMs: number) => void;
   /** MMD timeline frame rate. Defaults to 30. */
   readonly frameRate?: number;
   /** Initial runtime time in seconds. Defaults to 0. */

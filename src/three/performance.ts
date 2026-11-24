@@ -28,6 +28,19 @@ export function createLoaderPerformanceProfile(
   label: string,
   options: LoaderPerformanceOptions = {}
 ): LoaderPerformanceProfile | undefined {
+  // Private local files: callback-only measurements never enter User Timing.
+  if (options.enabled === false && options.onMeasure) {
+    const times = new Map<string, number>();
+    return {
+      measures: [],
+      mark(name) { times.set(name, performance.now()); },
+      measure(name, start, end) {
+        const a = times.get(start), b = times.get(end);
+        if (a !== undefined && b !== undefined) options.onMeasure?.({ label: "model", name, durationMs: b - a });
+      },
+      clear() { times.clear(); }
+    };
+  }
   if (!isLoaderPerformanceEnabled(options)) {
     return undefined;
   }

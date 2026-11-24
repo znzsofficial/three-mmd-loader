@@ -16,7 +16,7 @@ import {
 } from "./material/material-texture-set.js";
 import type { MmdDefaultMaterialTransparencyDiagnostic } from "./material/material-texture-set.js";
 import { createFallbackMmdMaterial, createTextureResolver } from "./textures.js";
-import type { TextureMap, TextureResolver } from "./textures.js";
+import type { LocalPngAlphaTiles, TextureMap, TextureResolver } from "./textures.js";
 
 export interface TextureLoadDiagnostic {
   readonly level: "warning";
@@ -51,6 +51,7 @@ export interface ThreeMmdMaterialTextureOptions {
   readonly geometry?: THREE.BufferGeometry;
   readonly morphs?: readonly MorphData[];
   readonly geometryAwareAlpha?: boolean;
+  readonly localPngAlphaTiles?: LocalPngAlphaTiles;
   readonly materialDiagnostics?: MaterialTransparencyDiagnostic[];
 }
 
@@ -99,7 +100,8 @@ export async function applyThreeMmdMaterialTextures(
     options.textureResolver,
     options.textureMap ?? (options.modelUrl ? {} : undefined)
   );
-  const textureLoader = options.textureLoader ?? new THREE.TextureLoader();
+  const textureLoader = options.textureLoader;
+  const alphaTiles = options.geometryAwareAlpha && !textureLoader ? new Map<HTMLImageElement, Uint8Array | null>() : undefined;
 
   await Promise.all(
     mmdMaterials.map(async (mmdMaterial, materialIndex) => {
@@ -137,7 +139,7 @@ export async function applyThreeMmdMaterialTextures(
             options.geometry,
             materialIndex,
             texture,
-            { geometryAwareAlpha: options.geometryAwareAlpha }
+            { geometryAwareAlpha: options.geometryAwareAlpha, alphaTiles, localPngAlphaTiles: options.localPngAlphaTiles }
           );
         material.transparent = transparencyMode === "alphaBlend";
         material.depthWrite = mmdMaterialDepthWrite(transparencyMode);

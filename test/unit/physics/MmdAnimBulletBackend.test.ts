@@ -189,6 +189,28 @@ describe("mmd-anim Bullet physics backend", () => {
     expect(populatedCalls[1]?.outContacts).toBe(populatedCalls[0]?.outContacts);
   });
 
+  it("reads selected centres in caller order and distinguishes a seed from a world step", () => {
+    const fake = makeFakeModule();
+    const work: number[][] = [];
+    const backend = createCustomBulletMmdPhysicsBackend(fake.module, {
+      onStepWork: (feed, step, outputs, seed) => work.push([feed, step, outputs, Number(seed)])
+    });
+    const rigidBodies = [[0, 2, 0], [4, 5, 6]].map((xyz, index) => ({ index, motionType: "static" as const,
+      shape: { type: "sphere" as const, size: [1, 1, 1] as const }, localTranslation: xyz as [number, number, number] }));
+    const context = { seconds: 0, frame: 0, frameRate: 30, deltaSeconds: 1/60, rigidBodies };
+    backend.step({...context, seeking:true});
+    backend.step(context);
+    expect(work.map(parts => parts[3])).toEqual([1, 0]);
+    expect(work[0][1]).toBe(0);
+    expect(work.flat().every(n => Number.isFinite(n) && n >= 0)).toBe(true);
+    const out = new Float32Array(6);
+    expect(backend.readRigidBodyCenters([1, 0], out)).toBe(true);
+    expect(Array.from(out)).toEqual([4, 5, 6, 0, 2, 0]);
+    expect(backend.readRigidBodyCenters([0, 1], out.subarray(0, 3))).toBe(false);
+    backend.dispose?.();
+    expect(backend.readRigidBodyCenters([0], out)).toBe(false);
+  });
+
   it("uploads rotations in the native Bullet ZYX encoding", () => {
     const fake = makeFakeModule();
     const backend = createMmdAnimBulletPhysicsBackend(fake.module);

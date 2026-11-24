@@ -16,6 +16,8 @@ export interface MmdDefaultMaterialTextureSet {
 }
 
 export interface MmdDefaultMaterialTransparencyOptions {
+  readonly alphaTiles?: textureAlpha.MaterialAlphaTiles;
+  readonly localPngAlphaTiles?: textureAlpha.LocalPngAlphaTiles;
   readonly geometryAwareAlpha?: boolean;
 }
 
@@ -137,7 +139,7 @@ export function evaluateMmdDefaultMaterialTransparency(
     (shouldUseTextureMetadata ? textureMetadataTransparencyMode : undefined) ??
     (texture && needsTextureTransparencyScan
       ? (options.geometryAwareAlpha
-        ? evaluateCachedMmdTextureAlphaGeometry(texture, geometry, materialIndex)
+        ? evaluateCachedMmdTextureAlphaGeometry(texture, geometry, materialIndex, options)
         : textureAlpha.evaluateMmdTextureAlphaTexture(texture))
       : undefined);
   const textureTransparencyMode =
@@ -244,7 +246,8 @@ function isLikelyMmdSoftAlphaOverlayMaterial(material: MaterialInfo): boolean {
 function evaluateCachedMmdTextureAlphaGeometry(
   texture: THREE.Texture,
   geometry: THREE.BufferGeometry,
-  materialIndex: number
+  materialIndex: number,
+  options: MmdDefaultMaterialTransparencyOptions
 ): MmdMaterialTransparencyMode | undefined {
   let geometryCache = geometryAlphaCache.get(texture);
   if (!geometryCache) {
@@ -259,7 +262,8 @@ function evaluateCachedMmdTextureAlphaGeometry(
   if (materialCache.has(materialIndex)) {
     return materialCache.get(materialIndex);
   }
-  const alphaMode = textureAlpha.evaluateMmdTextureAlphaGeometry(texture, geometry, materialIndex);
+  const alphaMode = textureAlpha.evaluateMmdTextureAlphaGeometry(texture, geometry, materialIndex,
+    { localPngAlphaTiles: options.localPngAlphaTiles }, options.alphaTiles);
   materialCache.set(materialIndex, alphaMode);
   return alphaMode;
 }

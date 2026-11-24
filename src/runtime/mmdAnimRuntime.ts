@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { syncRenderPalettes } from "./syncRenderPalettes.js";
 import { applyMorphOverrides, validateMorphOverrides } from "./morphOverrides.js";
 
 import type { CameraState, LightState, MmdAnimation } from "../parser/model/modelTypes.js";
@@ -549,7 +550,7 @@ export class MmdAnimRuntime implements MmdRuntime {
       evaluateOptions = meshOrOptions;
     }
     const state = this.evaluate(seconds, evaluateOptions);
-    syncRuntimeObjectForRender(renderObject ?? this.mesh);
+    syncRenderPalettes(renderObject ?? this.mesh);
     return state;
   }
 
@@ -1090,27 +1091,6 @@ function syncMorphWeights(mesh: THREE.SkinnedMesh, weights: Float32Array): void 
   }
   for (let index = 0; index < influences.length; index += 1) {
     influences[index] = weights[index] ?? 0;
-  }
-}
-
-function syncRuntimeObjectForRender(object: THREE.Object3D | undefined): void {
-  if (!object) {
-    return;
-  }
-  object.updateMatrixWorld(true);
-  updateSkinnedMeshSkeletons(object);
-}
-
-function updateSkinnedMeshSkeletons(object: THREE.Object3D): void {
-  if (isSkinnedMesh(object)) {
-    object.skeleton.update();
-  }
-  const children = object.children;
-  for (let index = 0; index < children.length; index += 1) {
-    const child = children[index];
-    if (child) {
-      updateSkinnedMeshSkeletons(child);
-    }
   }
 }
 

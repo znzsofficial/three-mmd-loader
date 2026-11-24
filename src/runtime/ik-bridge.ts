@@ -8,6 +8,8 @@ interface MutableCcdIkBone {
 }
 
 export interface SolvePreparedIkScratch {
+  ikBoneOrder?: THREE.Bone[];
+  ikBoneIndices?: Map<THREE.Bone, number>;
   readonly bones: MutableCcdIkBone[];
   readonly rotations: MutableQuatTuple[];
   readonly sourceBoneIndices: Set<number>;
@@ -19,11 +21,30 @@ function readIkChains(mesh: THREE.SkinnedMesh): RuntimeIkChain[] {
 }
 
 function createCcdIkStaticBones(mesh: THREE.SkinnedMesh): CcdIkBone[] {
+  const indices = indexBones(mesh.skeleton.bones);
   return mesh.skeleton.bones.map((bone) => ({
     parentIndex:
-      bone.parent instanceof THREE.Bone ? mesh.skeleton.bones.indexOf(bone.parent) : -1,
+      bone.parent instanceof THREE.Bone ? (indices.get(bone.parent) ?? -1) : -1,
     translation: [0, 0, 0] as const
   }));
+}
+
+// Match indexOf's first occurrence. The same array can be reordered in place.
+function indexBones(bones: readonly THREE.Bone[]): Map<THREE.Bone, number> {
+  const indices = new Map<THREE.Bone, number>();
+  for (let i = 0; i < bones.length; i++) if (!indices.has(bones[i])) indices.set(bones[i], i);
+  return indices;
+}
+
+function currentIndices(scratch: SolvePreparedIkScratch, bones: THREE.Bone[]): Map<THREE.Bone, number> {
+  const cached = scratch.ikBoneOrder;
+  if (scratch.ikBoneIndices && cached?.length === bones.length) {
+    let i = 0;
+    while (i < bones.length && cached[i] === bones[i]) ++i;
+    if (i === bones.length) return scratch.ikBoneIndices;
+  }
+  scratch.ikBoneOrder = bones.slice();
+  return scratch.ikBoneIndices = indexBones(bones);
 }
 
 function collectIkSourceBoneIndices(chains: readonly RuntimeIkChain[]): Set<number> {
@@ -69,20 +90,22 @@ export function solvePreparedIk(
   mesh: THREE.SkinnedMesh | undefined,
   solver: CcdIkSolver,
   chains: readonly CcdIkPreparedChain[],
-  scratch: SolvePreparedIkScratch
+  scratch: SolvePreparedIkScratch,
+  propagate = true
 ): Set<number> {
   if (!mesh || chains.length === 0) {
     scratch.sourceBoneIndices.clear();
     return scratch.sourceBoneIndices;
   }
-  mesh.updateWorldMatrix(false, true);
+  if (propagate) mesh.updateWorldMatrix(false, true);
   const skeletonBones = mesh.skeleton.bones;
+  const indices = currentIndices(scratch, skeletonBones);
   ensureIkScratchLength(scratch, skeletonBones.length);
   for (let index = 0; index < skeletonBones.length; index += 1) {
     const bone = skeletonBones[index];
     const scratchBone = scratch.bones[index];
     scratchBone.parentIndex =
-      bone.parent instanceof THREE.Bone ? skeletonBones.indexOf(bone.parent) : -1;
+      bone.parent instanceof THREE.Bone ? (indices.get(bone.parent) ?? -1) : -1;
     scratchBone.translation[0] = bone.position.x;
     scratchBone.translation[1] = bone.position.y;
     scratchBone.translation[2] = -bone.position.z;

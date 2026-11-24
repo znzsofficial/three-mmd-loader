@@ -55,14 +55,21 @@ export interface MmdAnimBulletContactPoint {
 }
 
 export interface MmdAnimBulletPhysicsBackend extends MmdPhysicsBackend {
+  readRigidBodyCenters(indices: readonly number[], out: Float32Array): boolean;
   debugContactCount(): number;
   debugPhysicsContacts(): readonly MmdAnimBulletContactPoint[];
   debugPhysicsContactsForRigidBodyRange(firstRigidBodyIndex: number, rigidBodyCount: number): readonly MmdAnimBulletContactPoint[];
 }
 
+interface BulletStepOptions {
+  onStepWork?: (feedMs: number, worldStepMs: number, outputsMs: number, seedOnly: boolean) => void;
+  fixedTimeStep?: number;
+  maxSubSteps?: number;
+}
+
 export function createMmdAnimBulletPhysicsBackend(
   module: MmdAnimBulletModule,
-  options: { fixedTimeStep?: number; maxSubSteps?: number } = {}
+  options: BulletStepOptions = {}
 ): MmdAnimBulletPhysicsBackend {
   return new MmdAnimBulletPhysicsBackendImpl(module, options);
 }
@@ -103,7 +110,7 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
   private contactBufferPointer = 0;
   private contactBufferCapacity = 0;
 
-  constructor(private readonly module: MmdAnimBulletModule, private readonly options: { fixedTimeStep?: number; maxSubSteps?: number }) {
+  constructor(private readonly module: MmdAnimBulletModule, private readonly options: BulletStepOptions) {
     this.outWorldPointer = module._malloc(4);
     this.outIndexPointer = module._malloc(4);
     this.transformPositionPointer = module._malloc(12);
@@ -128,6 +135,8 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
 
   step(context: MmdPhysicsStepContext): MmdPhysicsStepResult {
     if (this.disposedState) return { simulated: false, diagnostics: this.diagnostics() };
+    const observe = this.options.onStepWork;
+    const start = observe ? performance.now() : 0;
     if (!this.ensureModel(context)) {
       return { simulated: false, diagnostics: [{ level: "error", code: "PHYSICS_BACKEND_MODEL_UPLOAD_FAILED", message: "Failed to upload MMD model to mmd-anim Bullet." }] };
     }
@@ -140,6 +149,7 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
       // constrained hair chain and makes the tail explode after a few frames.
       this.feedBodies(inputWorld, toggles, false, false);
     }
+    let nativeAt = 0;
     if (seedOnly) {
       this.module._mmd_anim_bullet_world_reset(this.world);
       if (inputWorld) this.feedBodies(inputWorld, undefined, true, true);
@@ -147,10 +157,15 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
       // animation pose at frame 0 before the first forward physics tick.
       this.module._mmd_anim_bullet_world_settle_to_current(this.world);
       this.pendingReset = false;
-    } else if (this.module._mmd_anim_bullet_world_step(this.world, Math.max(0, context.deltaSeconds), this.options.maxSubSteps ?? 5, this.options.fixedTimeStep ?? 1 / 60) !== 0) {
-      return { simulated: false, diagnostics: [{ level: "error", code: "PHYSICS_BACKEND_STEP_FAILED", message: "mmd-anim Bullet step failed." }] };
+    } else {
+      if (observe) nativeAt = performance.now();
+      if (this.module._mmd_anim_bullet_world_step(this.world, Math.max(0, context.deltaSeconds), this.options.maxSubSteps ?? 5, this.options.fixedTimeStep ?? 1 / 60) !== 0) {
+        return { simulated: false, diagnostics: [{ level: "error", code: "PHYSICS_BACKEND_STEP_FAILED", message: "mmd-anim Bullet step failed." }] };
+      }
     }
+    const outputAt = observe ? performance.now() : 0;
     const updated = this.copyDynamicOutputs(context, toggles);
+    if (observe) observe((seedOnly ? outputAt : nativeAt) - start, seedOnly ? 0 : outputAt - nativeAt, performance.now() - outputAt, seedOnly);
     return { simulated: !seedOnly && updated > 0, updatedBoneCount: updated };
   }
 
@@ -186,14 +201,14 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
   }
 
   debugPhysicsContacts(): readonly MmdAnimBulletContactPoint[] {
-    return this.collectPhysicsContacts();
+    return this.collectPhysicsContacts(0, undefined);
   }
 
   debugPhysicsContactsForRigidBodyRange(firstRigidBodyIndex: number, rigidBodyCount: number): readonly MmdAnimBulletContactPoint[] {
     return this.collectPhysicsContacts(firstRigidBodyIndex, rigidBodyCount);
   }
 
-  private collectPhysicsContacts(firstRigidBodyIndex = 0, rigidBodyCount = -1): readonly MmdAnimBulletContactPoint[] {
+  private collectPhysicsContacts(firstRigidBodyIndex: number, rigidBodyCount: number | undefined): readonly MmdAnimBulletContactPoint[] {
     const collect = this.module._mmd_anim_bullet_world_collect_contacts;
     const count = this.debugContactCount();
     if (!collect || count <= 0) return [];
@@ -212,12 +227,12 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
       this.contactBufferCapacity
     );
     const contacts: MmdAnimBulletContactPoint[] = [];
-    const rangeEnd = firstRigidBodyIndex + rigidBodyCount;
+    const rangeEnd = firstRigidBodyIndex + (rigidBodyCount ?? 0);
     for (let index = 0; index < written; index += 1) {
       const base = (this.contactBufferPointer + index * CONTACT_POINT_BYTES) >>> 2;
       const rigidBodyIndexA = heapI32[base] ?? -1;
       const rigidBodyIndexB = heapI32[base + 1] ?? -1;
-      if (rigidBodyCount >= 0 && !(
+      if (rigidBodyCount !== undefined && !(
         (rigidBodyIndexA >= firstRigidBodyIndex && rigidBodyIndexA < rangeEnd) ||
         (rigidBodyIndexB >= firstRigidBodyIndex && rigidBodyIndexB < rangeEnd)
       )) continue;
@@ -231,6 +246,20 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
       });
     }
     return contacts;
+  }
+
+  readRigidBodyCenters(indices: readonly number[], out: Float32Array): boolean {
+    if (this.disposedState || out.length < indices.length * 3) return false;
+    const heap = this.module.HEAPF32;
+    if (!heap) return false;
+    const offset = this.transformPositionPointer >>> 2;
+    for (let i = 0; i < indices.length; i++) {
+      if (this.module._mmd_anim_bullet_world_get_rigidbody_transform(this.world, indices[i], this.transformPositionPointer, this.transformRotationPointer) !== 0) return false;
+      out[i * 3] = heap[offset];
+      out[i * 3 + 1] = heap[offset + 1];
+      out[i * 3 + 2] = heap[offset + 2];
+    }
+    return true;
   }
 
   private ensureModel(context: MmdPhysicsStepContext): boolean {

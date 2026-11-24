@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
-import { getShadowMaterial, getShadowRenderObjectFunction, positionWorld, uniform, vec3, vec4 } from "three/tsl";
+import * as tsl from "three/tsl";
+import { positionWorld, uniform, vec3, vec4 } from "three/tsl";
 
 import { MMD_SELF_SHADOW_LAYER } from "../three/shadow.js";
 import { createMmdTslShadowVisibilityNode } from "./shadow-visibility.js";
@@ -56,16 +57,23 @@ export function createMmdTslSelfShadowPass(
 
   // Own the material so disposing/recreating this pass cannot poison Three's
   // shared shadow material for the same light.
-  const shadowMaterial = getShadowMaterial(light).clone();
-  (shadowMaterial as unknown as { isShadowPassMaterial: boolean }).isShadowPassMaterial = true;
-  const referencePosition = uniform(projection.sampleMatrix).mul(vec4(positionWorld, 1));
-  shadowMaterial.fragmentNode = vec4(referencePosition.z.div(referencePosition.w), 0, 0, 1);
-  const shadowRenderObjectFunction = getShadowRenderObjectFunction(
+  // r186 removed both public helpers. Don't use a named import that fails
+  // during module linking, or reach into Three's private replacement API.
+  type RenderObject = NonNullable<Parameters<THREE.WebGPURenderer["setRenderObjectFunction"]>[0]>;
+  const getMaterial = Reflect.get(tsl, "getShadowMaterial") as ((light: THREE.DirectionalLight) => THREE.NodeMaterial) | undefined;
+  const getRenderObject = Reflect.get(tsl, "getShadowRenderObjectFunction") as unknown as ((renderer: THREE.WebGPURenderer, shadow: THREE.LightShadow, type: THREE.ShadowMapType, velocity: boolean) => RenderObject) | undefined;
+  const shadowMaterial = getMaterial && getRenderObject ? getMaterial(light).clone() : null;
+  if (shadowMaterial) {
+    (shadowMaterial as unknown as { isShadowPassMaterial: boolean }).isShadowPassMaterial = true;
+    const referencePosition = uniform(projection.sampleMatrix).mul(vec4(positionWorld, 1));
+    shadowMaterial.fragmentNode = vec4(referencePosition.z.div(referencePosition.w), 0, 0, 1);
+  }
+  const shadowRenderObjectFunction = shadowMaterial && getRenderObject?.(
     renderer,
     light.shadow,
     renderer.shadowMap.type,
     false
-  ) as unknown as Parameters<THREE.WebGPURenderer["setRenderObjectFunction"]>[0];
+  );
   const referenceRenderObject: NonNullable<typeof shadowRenderObjectFunction> =
     (object, scene, camera, geometry, material, group, lightsNode, clippingContext, passId) => {
       const source = material.userData.mmdReferenceShadowSource ?? material;
@@ -104,6 +112,7 @@ export function createMmdTslSelfShadowPass(
   ): THREE.Camera | undefined {
     if (
       disposed || prepared ||
+      !shadowMaterial || !shadowRenderObjectFunction ||
       currentRenderer !== renderer ||
       currentLight !== light ||
       currentLight.castShadow !== true
@@ -238,7 +247,7 @@ export function createMmdTslSelfShadowPass(
       }
       disposed = true;
       renderTarget.dispose();
-      shadowMaterial.dispose();
+      shadowMaterial?.dispose();
       projection.release();
     }
   };

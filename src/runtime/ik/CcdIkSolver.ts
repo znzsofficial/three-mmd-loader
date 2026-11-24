@@ -91,6 +91,7 @@ const matrixElementCount = 16;
 export class CcdIkSolver {
   private readonly scratchComposeLocalMatrix = new Float32Array(matrixElementCount);
   private scratchComposeStates = new Uint8Array(0);
+  private readonly scratchActiveOrder: number[] = [];
   private readonly scratchTranslations: [number, number, number][] = [];
   private scratchMatrices = new Float32Array(0);
   private readonly scratchBaseRotations: [number, number, number, number][] = [];
@@ -198,6 +199,10 @@ export class CcdIkSolver {
       this.scratchComposeLocalMatrix,
       composeStates
     );
+    // The initial full compose still validates the hierarchy. Inside CCD
+    // only joints, targets, effectors and their ancestors will be read.
+    const activeOrder = this.scratchActiveOrder;
+    collectActiveOrder(input.bones, input.chains, composeStates, activeOrder);
     for (const chain of input.chains) {
       const iterationCount = Math.min(
         Math.max(Math.trunc(chain.iterationCount), 0),
@@ -212,7 +217,7 @@ export class CcdIkSolver {
           chain,
           iterationCount,
           this.scratchComposeLocalMatrix,
-          composeStates,
+          activeOrder,
           this.scratchBaseRotations,
           this.scratchIkRotations,
           this.scratchBestRotations,
@@ -393,7 +398,7 @@ function solveChain(
   chain: CcdIkChain,
   iterationCount: number,
   composeLocalMatrix: Float32Array,
-  composeStates: Uint8Array,
+  activeOrder: readonly number[],
   baseRotations: [number, number, number, number][],
   ikRotations: [number, number, number, number][],
   bestRotations: [number, number, number, number][],
@@ -467,7 +472,7 @@ function solveChain(
           limitAngle,
           axisIndex: singleAxis,
           composeLocalMatrix,
-          composeStates,
+          activeOrder,
           vectorScratch,
           quaternionScratch
         });
@@ -587,13 +592,13 @@ function solveChain(
         }
       }
       applyEffectiveRotation(rotations, baseRotations, ikRotations, link.boneIndex);
-      composeWorldMatrices(
+      composeActiveMatrices(
         bones,
         translations,
         rotations,
         matrices,
         composeLocalMatrix,
-        composeStates
+        activeOrder
       );
     }
 
@@ -631,13 +636,13 @@ function solveChain(
           applyEffectiveRotation(rotations, baseRotations, ikRotations, boneIndex);
         }
       }
-      composeWorldMatrices(
+      composeActiveMatrices(
         bones,
         translations,
         rotations,
         matrices,
         composeLocalMatrix,
-        composeStates
+        activeOrder
       );
       break;
     }
@@ -677,7 +682,7 @@ function solvePlaneLink({
   limitAngle,
   axisIndex,
   composeLocalMatrix,
-  composeStates,
+  activeOrder,
   vectorScratch,
   quaternionScratch
 }: {
@@ -697,7 +702,7 @@ function solvePlaneLink({
   readonly limitAngle: number;
   readonly axisIndex: number;
   readonly composeLocalMatrix: Float32Array;
-  readonly composeStates: Uint8Array;
+  readonly activeOrder: readonly number[];
   readonly vectorScratch: [number, number, number][];
   readonly quaternionScratch: MutableQuatTuple[];
 }): void {
@@ -781,13 +786,13 @@ function solvePlaneLink({
     ikRotations[link.boneIndex]
   );
   applyEffectiveRotation(rotations, baseRotations, ikRotations, link.boneIndex);
-  composeWorldMatrices(
+  composeActiveMatrices(
     bones,
     translations,
     rotations,
     matrices,
     composeLocalMatrix,
-    composeStates
+    activeOrder
   );
 }
 
@@ -875,6 +880,36 @@ function assertAcyclicParentChain(bones: readonly CcdIkBone[], boneIndex: number
     visited.add(currentIndex);
     currentIndex = bones[currentIndex]?.parentIndex ?? -1;
   }
+}
+
+function collectActiveOrder(bones: readonly CcdIkBone[], chains: readonly CcdIkChain[], visited: Uint8Array, order: number[]): void {
+  visited.fill(0, 0, bones.length);
+  order.length = 0;
+  for (const chain of chains) {
+    appendAncestors(chain.goalBoneIndex, bones, visited, order);
+    appendAncestors(chain.effectorBoneIndex, bones, visited, order);
+    for (const link of chain.links) appendAncestors(link.boneIndex, bones, visited, order);
+  }
+}
+
+function appendAncestors(index: number, bones: readonly CcdIkBone[], visited: Uint8Array, order: number[]): void {
+  const start = order.length;
+  while (index >= 0 && !visited[index]) {
+    visited[index] = 1;
+    order.push(index);
+    index = bones[index].parentIndex;
+  }
+  // Reverse only this branch: parents may occur after children in a PMX.
+  for (let a = start, b = order.length - 1; a < b; a++, b--) {
+    const tmp = order[a]; order[a] = order[b]; order[b] = tmp;
+  }
+}
+
+function composeActiveMatrices(
+  bones: readonly CcdIkBone[], translations: readonly [number, number, number][], rotations: readonly QuatTuple[],
+  matrices: Float32Array, local: Float32Array, order: readonly number[]
+): void {
+  for (const index of order) composeWorldMatrixInOrder(index, bones, translations, rotations, matrices, local);
 }
 
 function composeWorldMatrices(

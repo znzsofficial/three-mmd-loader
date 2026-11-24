@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
 
 import { DefaultMmdRuntime } from "../../../src/index.js";
@@ -83,7 +83,7 @@ describe("DefaultMmdRuntime", () => {
     });
   });
 
-  it("keeps tick render sync on the hot path allocation-free", async () => {
+  it("reuses tick options and frame state on the hot path", async () => {
     const source = await readFile("src/runtime/core.ts", "utf8");
 
     expect(source).not.toContain("function normalizeTickOptions");
@@ -96,7 +96,25 @@ describe("DefaultMmdRuntime", () => {
     expect(source).toContain("evaluate(seconds: number, options?: MmdRuntimeEvaluateOptions)");
     expect(source).toContain("writeFrameState(this.state, seconds, this.frameRate);");
     expect(source).toContain("return copyFrameStateInto(this.evaluateReturnState, this.state);");
-    expect(source).toContain("function updateSkinnedMeshSkeletons(");
+  });
+
+  it("updates a shared palette once per tick and observes a live proxy rebind", () => {
+    const root = new THREE.Group(), bone = new THREE.Bone();
+    root.add(bone);
+    const original = new THREE.Skeleton([bone]), rebound = new THREE.Skeleton([bone]);
+    const proxy = new THREE.SkinnedMesh(), body = new THREE.SkinnedMesh();
+    proxy.bind(original); body.bind(original); root.add(body, proxy);
+    const oldUploads = vi.spyOn(original, "update"), newUploads = vi.spyOn(rebound, "update");
+    const runtime = new DefaultMmdRuntime();
+    bone.position.x = 3;
+    runtime.tick(0, {mesh:root});
+    expect(oldUploads).toHaveBeenCalledTimes(1);
+    expect(original.boneMatrices[12]).toBe(3);
+    proxy.skeleton = rebound; bone.position.x = 4;
+    runtime.tick(0, {mesh:root});
+    expect(oldUploads).toHaveBeenCalledTimes(2);
+    expect(newUploads).toHaveBeenCalledTimes(1);
+    expect(rebound.boneMatrices[12]).toBe(4);
   });
 
   it("ticks evaluation and syncs renderer-facing skeleton matrices", () => {

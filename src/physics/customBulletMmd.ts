@@ -23,6 +23,8 @@ export interface CustomBulletMmdLoaderOptions {
 }
 
 export interface CustomBulletMmdPhysicsBackendOptions {
+  /** Completed calls only. Reset/seed work counts towards feedMs, not worldStepMs. */
+  readonly onStepWork?: (feedMs: number, worldStepMs: number, outputsMs: number, seedOnly: boolean) => void;
   readonly fixedTimeStep?: number;
   readonly maxSubSteps?: number;
 }
@@ -31,6 +33,7 @@ export interface CustomBulletMmdPhysicsBackendOptions {
 export type CustomBulletMmdModule = MmdAnimBulletModule;
 
 export interface CustomBulletMmdPhysicsBackend extends MmdDirectBufferPhysicsBackend {
+  readRigidBodyCenters(indices: readonly number[], out: Float32Array): boolean;
   debugContactCount(): number;
   debugPhysicsContacts(): readonly MmdAnimBulletContactPoint[];
   debugPhysicsContactsForRigidBodyRange(firstRigidBodyIndex: number, rigidBodyCount: number): readonly MmdAnimBulletContactPoint[];
@@ -138,6 +141,10 @@ class CustomBulletMmdCompatibilityBackend implements CustomBulletMmdPhysicsBacke
 
   debugContactCount(): number {
     return this.backend.debugContactCount();
+  }
+
+  readRigidBodyCenters(indices: readonly number[], out: Float32Array): boolean {
+    return this.backend.readRigidBodyCenters(indices, out);
   }
 
   debugPhysicsContacts(): readonly MmdAnimBulletContactPoint[] {

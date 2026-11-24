@@ -154,6 +154,39 @@ describe("ThreeMmdLoader", () => {
     expect(model.runtime).toBe(runtime);
   });
 
+  it("exchanges the evaluator of a loaded mesh and routes synchronous and asynchronous updates to the new owner", async () => {
+    const first = createStubRuntime(), second = createStubRuntime();
+    const runtimeFactory = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second);
+    const loader = new ThreeMmdLoader({runtimeFactory});
+    const bytes = await readFile(resolve("test/fixtures/test_1bone_cube.pmx"));
+    const model = await loader.loadModel(bytes);
+    const mesh = model.mesh;
+    const next = await loader.createDetachedRuntime({mesh, source:model.source, modelBytes:bytes});
+    expect(model.runtime).toBe(first);
+    expect(model.exchangeRuntime(next)).toBe(first);
+    expect(model.runtime).toBe(second);
+    model.setAnimation(createEmptyMmdAnimation());
+    model.update(.2); await model.updateAsync(.3);
+    expect(first.tick).not.toHaveBeenCalled();
+    expect(second.setAnimation).toHaveBeenCalledWith(expect.anything(), mesh);
+    expect(second.tick).toHaveBeenCalledTimes(2);
+    expect(model.exchangeRuntime(first)).toBe(second);
+    model.update(.4);
+    expect(first.tick).toHaveBeenCalledTimes(1);
+    expect(model.mesh).toBe(mesh);
+  });
+
+  it("records callback-only load timings without putting the filename in User Timing", async () => {
+    const marks = vi.spyOn(performance, "mark"), measures = vi.spyOn(performance, "measure");
+    const onMeasure = vi.fn();
+    const model = await new ThreeMmdLoader({performance:{enabled:false, onMeasure}}).loadModel(
+      new File([await readFile(resolve("test/fixtures/test_1bone_cube.pmx"))], "private-model.pmx"));
+    expect(onMeasure).toHaveBeenCalledWith(expect.objectContaining({label:"model", name:"load-textures", durationMs:expect.any(Number)}));
+    expect(model.diagnostics.performance).toEqual([]);
+    expect(marks).not.toHaveBeenCalled();
+    expect(measures).not.toHaveBeenCalled();
+  });
+
   it("waits for material textures before invoking runtimeFactory", async () => {
     const runtime = createStubRuntime();
     let releaseTexture!: () => void;
