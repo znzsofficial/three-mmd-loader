@@ -595,6 +595,49 @@ describe("ThreeMmdLoader", () => {
     expect(model.mesh.morphTargetInfluences).toHaveLength(1000);
   });
 
+  it.each([false, true])("applies grouped alpha and UVs to the actual draws, including split remaps (%s)", async morphSplit => {
+    const data = createSparseMorphStressModel({ edge: true });
+    const materials = data.materials(), morphs = data.morphs(), geometry = data.geometry();
+    materials[0].diffuse[3] = materials[0].edgeColor[3] = 0;
+    geometry.uvs[2] = .25;
+    geometry.additionalUvs = [new Float32Array(geometry.uvs.length * 2)];
+    const offset = (slot: number, operation: "add" | "multiply", alpha: number) => ({
+      materialIndex: slot, operation, diffuse: [0, 0, 0, alpha] as [number,number,number,number],
+      edgeColor: [0, 0, 0, alpha] as [number,number,number,number], specular: [0,0,0] as [number,number,number],
+      ambient: [0,0,0] as [number,number,number], specularPower: 0, edgeSize: 0,
+      textureFactor: [0,0,0,0] as [number,number,number,number], sphereTextureFactor: [0,0,0,0] as [number,number,number,number],
+      toonTextureFactor: [0,0,0,0] as [number,number,number,number]
+    });
+    morphs[995].type = "group";
+    morphs[995].groupOffsets = [996,997,998,999].map(morphIndex => ({ morphIndex, weight: 1 }));
+    morphs[996].type = "uv"; morphs[996].uvOffsets = [{ vertexIndex: 1, uv: [3,-6,0,0] }];
+    morphs[997].type = "additionalUv"; morphs[997].additionalUvOffsets = [{ vertexIndex: 1, uvIndex: 0, uv: [-2,3,4,5] }];
+    morphs[998].type = "material"; morphs[998].materialOffsets = [offset(0,"add",1),offset(-1,"multiply",0)];
+    morphs[999].type = "uv"; morphs[999].uvOffsets = [{ vertexIndex: 1, uv: [-1,2,0,0] }];
+    const loader = new ThreeMmdLoader({ core: { ...createIkFlagCore(), loadModel: () => ({ ...data,
+      morphs: () => morphs, materials: () => materials, geometry: () => geometry }) } });
+    const model = await loader.loadModel(new Uint8Array([1]), { morphSplit });
+    const bodies = model.mesh.userData.mmdMorphSplitBodyMeshes ?? model.renderOrderMeshes;
+    const uv = bodies[0].geometry.getAttribute("uv"), uv1 = bodies[0].geometry.getAttribute("uv1");
+    const [hidden, solid] = model.mesh.material as THREE.Material[];
+    const edge = model.outlineMeshes[0].material as THREE.Material;
+    model.setAnimation(createEmptyMmdAnimation());
+    const input = (weight: number) => ({ morphOverrides: { indices: Uint32Array.of(995), weights: Float32Array.of(weight) } });
+    expect(hidden.colorWrite).toBe(false);
+    model.update(0, input(.5));
+    expect([uv.getX(1), uv.getY(1), uv1.getZ(1), uv1.getW(1)]).toEqual([1.25,-2,2,2.5]);
+    expect([hidden.opacity, hidden.visible, hidden.colorWrite, solid.opacity, edge.opacity, edge.visible]).toEqual([.5,true,true,.5,.5,true]);
+    expect(hidden.alphaTest).toBeGreaterThan(0);
+    const changed = uv.version;
+    await model.updateAsync(0, input(.5));
+    expect(uv.version).toBe(changed);
+    await model.updateAsync(0, input(1));
+    expect([uv.getX(1), hidden.opacity, solid.opacity, solid.visible]).toEqual([2.25,1,0,false]);
+    model.update(0);
+    expect([uv.getX(1), uv.getY(1), uv1.getW(1), hidden.opacity, hidden.colorWrite, solid.opacity, edge.visible]).toEqual([.25,0,0,0,false,1,false]);
+    expect(hidden.alphaTest).toBe(0);
+  });
+
   it("uses split body meshes directly instead of duplicate render-order proxies", async () => {
     const loader = new ThreeMmdLoader({ core: createSparseMorphStressCore() });
 
