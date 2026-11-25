@@ -1,6 +1,20 @@
 # XR Stage fork of 0.8.6
 
-This fork carries the TypeScript source equivalents of the XR Stage application's 0.8.6 pnpm patch. The upstream `v0.8.6` tag and npm package are unchanged. The fork uses the same pinned mmd-anim and Bullet binaries; these additions do not change the native ABI.
+XR Stage uses the npm release of `@yohawing/three-mmd-loader` plus a patch derived from this fork's built `dist/`. The current base is **npm `0.8.6` / upstream `v0.8.6` (`9c47b94`)**. The fork retains that release's ESM entry points, declarations and pinned mmd-anim/Bullet binaries.
+
+## Sync policy
+
+- Start each update from the latest **published** upstream release that passes the stage's checks. Verify the npm version and corresponding tag/commit; an open release PR or a newer development branch is not a new baseline.
+- Keep fork-specific changes in TypeScript here. An individually verified upstream fix can be backported with `git cherry-pick -x`; keep its tests and provenance. When the next release includes an equivalent fix, verify coverage before dropping the backport.
+- Build here with `npm run build` and that release's matching artifacts. Generate the stage patch against a clean copy of the published package and compare the resulting **entire `dist/` tree** to the fork build, including added files. Normalize CRLF to LF for `.js` and `.d.ts` comparisons; compare binary assets byte for byte. Recheck the export map and run the fork and stage tests before adopting the update.
+
+## Morph atlas backport
+
+Upstream [`3f3c82a`](https://github.com/yohawing/three-mmd-loader/commit/3f3c82a3fc881bd3803276ad3a2e1335e5dc5a33) was picked individually from `release/v0.9.0` onto the existing XR Stage `0.8.6` extensions (`82147af`). Material and outline proxies share the source geometry, so Three.js allocates the morph atlas once per source geometry. Each proxy narrows the draw range during its own color draw, shadow draw or raycast and restores the prior range afterward. Outside those callbacks, read `start` and `count` from `userData.mmdMaterialRenderProxy` or `userData.mmdOutlineProxy`, not from the shared geometry's `drawRange`.
+
+The backport does not require a native rebuild. The mmd-anim source pin remains `v0.5.4` (`f4f68d7`). The packed parser WASM, Bullet classic and worker WASM, and their generated bindings match the published `0.8.6` package byte for byte. SHA-256: parser `b764d802403f042e38ee83d3c34abab468c064dd5e98ab4d49cc8ea2ca9dbce6`; Bullet (both variants) `02e32a4c9ec3b16d166feec06edc20cf689be9a60e3286f2048c3c02392bebc9`.
+
+## Retained XR Stage extensions
 
 - **Contact queries:** `debugPhysicsContactsForRigidBodyRange(first, count)` returns contacts involving either body in the half-open range. The native debug buffer is still collected in full. `readRigidBodyCenters(indices, out)` reads XYZ triples in the requested order. Only use `out` if the call returns `true`.
 - **Switching physics:** `ThreeMmdLoader.createDetachedRuntime(context)` uses the loader's existing runtime selection. `model.exchangeRuntime(next)` changes the evaluator used by the loaded mesh's animation and update methods, returning the old evaluator. The caller manages animation rebinding and disposal of the old evaluator.
