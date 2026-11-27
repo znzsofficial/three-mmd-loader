@@ -1,6 +1,6 @@
-# XR Stage fork of 0.8.6
+# XR Stage fork of 0.9.0
 
-XR Stage uses the npm release of `@yohawing/three-mmd-loader` plus a patch derived from this fork's built `dist/`. The current base is **npm `0.8.6` / upstream `v0.8.6` (`9c47b94`)**. The fork retains that release's ESM entry points, declarations and pinned mmd-anim/Bullet binaries.
+XR Stage uses the npm release of `@yohawing/three-mmd-loader` plus a patch derived from this fork's built `dist/`. The base is **npm `0.9.0` / upstream `v0.9.0` (`62ce047`)**. Keep the published entry points, dependency contract and mmd-anim/Bullet binaries; the extra stage APIs live in this source tree.
 
 ## Sync policy
 
@@ -8,11 +8,11 @@ XR Stage uses the npm release of `@yohawing/three-mmd-loader` plus a patch deriv
 - Keep fork-specific changes in TypeScript here. An individually verified upstream fix can be backported with `git cherry-pick -x`; keep its tests and provenance. When the next release includes an equivalent fix, verify coverage before dropping the backport.
 - Build here with `npm run build` and that release's matching artifacts. Generate the stage patch against a clean copy of the published package and compare the resulting **entire `dist/` tree** to the fork build, including added files. Normalize CRLF to LF for `.js` and `.d.ts` comparisons; compare binary assets byte for byte. Recheck the export map and run the fork and stage tests before adopting the update.
 
-## Morph atlas backport
+## Changes now supplied by upstream
 
-Upstream [`3f3c82a`](https://github.com/yohawing/three-mmd-loader/commit/3f3c82a3fc881bd3803276ad3a2e1335e5dc5a33) was picked individually from `release/v0.9.0` onto the existing XR Stage `0.8.6` extensions (`82147af`). Material and outline proxies share the source geometry, so Three.js allocates the morph atlas once per source geometry. Each proxy narrows the draw range during its own color draw, shadow draw or raycast and restores the prior range afterward. Outside those callbacks, read `start` and `count` from `userData.mmdMaterialRenderProxy` or `userData.mmdOutlineProxy`, not from the shared geometry's `drawRange`.
+The shared material/outline geometry fix [`3f3c82a`](https://github.com/yohawing/three-mmd-loader/commit/3f3c82a3fc881bd3803276ad3a2e1335e5dc5a33), rigid-body range queries and r186/r187 TSL self-shadow compatibility are in 0.9.0. Keep their upstream implementations. Outside draw callbacks, read the proxy's `start` and `count` from `userData.mmdMaterialRenderProxy` or `userData.mmdOutlineProxy`, not the shared geometry's `drawRange`.
 
-The backport does not require a native rebuild. The mmd-anim source pin remains `v0.5.4` (`f4f68d7`). The packed parser WASM, Bullet classic and worker WASM, and their generated bindings match the published `0.8.6` package byte for byte. SHA-256: parser `b764d802403f042e38ee83d3c34abab468c064dd5e98ab4d49cc8ea2ca9dbce6`; Bullet (both variants) `02e32a4c9ec3b16d166feec06edc20cf689be9a60e3286f2048c3c02392bebc9`.
+The native source pin is `mmd-anim v0.5.5` (`3bbd5b0`). The parser WASM, Bullet classic and worker WASM and generated bindings come from the integrity-checked 0.9.0 package. SHA-256: parser `530f14f7b3df03fdeb9ed8e4b6130f5344fd2b6d2bbbfcb195a3a82be72e598c`; classic Bullet `b82107ac43d0ec79f9bc0a601ec6a773401e13d007bc4c9113e34f17e772b990`.
 
 ## Retained XR Stage extensions
 
@@ -22,4 +22,4 @@ The backport does not require a native rebuild. The mmd-anim source pin remains 
 - **Timing:** `onPhysicsPoseWork` measures animation/IK, input preparation, backend, and writeback. Bullet's `onStepWork` breaks down successful calls into input, native world step, and output; a reset/seed has no world-step time. Loader `performance: { enabled: false, onMeasure }` reports timings without filename-bearing global User Timing marks.
 - **Material alpha:** geometry-aware scans reuse alpha samples for shared decoded images while classifying each material's UVs separately. A caller can also supply `localPngAlphaTiles` for repeated loads of the same local PNG `File`. Default GPU textures remain model-owned, not shared between models.
 - **Surface morphs:** after `model.update()` or `updateAsync()`, apply evaluated PMX diffuse/edge alpha to the affected draws and standard/additional UV offsets to their bound attributes, including split geometry. Held UV weights do not dirty the attribute again. The facade consumes expanded weights; supply direct manual input to the evaluator with `morphOverrides`. This change does not evaluate other PMX material morph components.
-- **Three.js compatibility:** the experimental TSL self-shadow pass uses the public shadow helpers when available (including r184). If they are absent (including r187) its render/compile steps return `false`; mode selection and resource disposal still work. This does not disable WebGL shadows.
+- **XR rendering policy:** the game disables the dedicated MMD self-shadow pass in XR and removes its shadow-only proxy. This is independent of 0.9.0's support for running the pass on r187.

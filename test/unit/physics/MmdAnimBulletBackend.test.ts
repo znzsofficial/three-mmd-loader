@@ -21,7 +21,6 @@ function makeFakeModule() {
   let resetCount = 0;
   let settleCount = 0;
   let contactCount = 0;
-  let contactWriter: ((outContacts: number, capacity: number) => void) | undefined;
   let stepHook: (() => void) | undefined;
   const stepCalls: Array<[number, number, number]> = [];
   const setBodyCalls: Array<{ index: number; position: [number, number, number] }> = [];
@@ -82,14 +81,12 @@ function makeFakeModule() {
       contactCalls.push({ outContacts, capacity });
       heapU32[outCount >>> 2] = contactCount;
       if (outContacts !== 0 && capacity > 0) {
-        if (contactWriter) {
-          contactWriter(outContacts, capacity);
-          return 0;
-        }
         const heapI32 = new Int32Array(buffer);
         const base = outContacts >>> 2;
-        heapI32[base] = 3;
-        heapI32[base + 1] = 7;
+        for (let index = 0; index < Math.min(contactCount, capacity); index++) {
+          heapI32[base + index * 12] = 3 + index;
+          heapI32[base + index * 12 + 1] = 7 + index;
+        }
         heap[base + 2] = -0.25;
         heap.set([1, 2, 3], base + 3);
         heap.set([4, 5, 6], base + 6);
@@ -117,7 +114,6 @@ function makeFakeModule() {
     get resetCount() { return resetCount; },
     get settleCount() { return settleCount; },
     setContactCount(count: number) { contactCount = count; },
-    setContactWriter(writer: ((outContacts: number, capacity: number) => void) | undefined) { contactWriter = writer; },
     setStepHook(hook: (() => void) | undefined) { stepHook = hook; }
   };
 }
@@ -162,31 +158,34 @@ describe("mmd-anim Bullet physics backend", () => {
     expect(backend.debugPhysicsContacts?.()).toEqual([]);
   });
 
-  it("filters contacts to a rigid-body range and reuses the native contact buffer", () => {
+  it("filters either endpoint across the entire native contact buffer", () => {
     const fake = makeFakeModule();
     const backend = createCustomBulletMmdPhysicsBackend(fake.module);
-    const heap = fake.module.HEAPF32;
-    if (!heap) throw new Error("Expected fake module HEAPF32.");
-    const heapI32 = new Int32Array(heap.buffer);
-    const contactCount = 300;
-    fake.setContactCount(contactCount);
-    fake.setContactWriter((outContacts, capacity) => {
-      for (let index = 0; index < Math.min(capacity, contactCount); index += 1) {
-        const base = (outContacts + index * 48) >>> 2;
-        heapI32[base] = index === contactCount - 1 ? 0 : 1;
-        heapI32[base + 1] = index === contactCount - 1 ? 343 : 2;
-      }
-    });
+    fake.setContactCount(1);
+    expect(backend.debugPhysicsContactsForRigidBodyRange(3, 5)).toHaveLength(1);
+    fake.setContactCount(600);
+    const contacts = backend.debugPhysicsContactsForRigidBodyRange(602, 1);
+    expect(contacts.map(point => [point.rigidBodyIndexA, point.rigidBodyIndexB]))
+      .toEqual([[598, 602], [602, 606]]);
+    expect(backend.debugPhysicsContactsForRigidBodyRange(0, 3)).toEqual([]);
+    expect(backend.debugPhysicsContactsForRigidBodyRange(607, 1)).toEqual([]);
+    const writes = fake.contactCalls.filter(call => call.capacity === 600);
+    expect(writes).toHaveLength(3);
+    expect(writes[1]?.outContacts).toBe(writes[0]?.outContacts);
+    expect(writes[2]?.outContacts).toBe(writes[0]?.outContacts);
+    backend.dispose();
+  });
 
-    expect(backend.debugPhysicsContactsForRigidBodyRange(343, 2)).toEqual([
-      expect.objectContaining({ rigidBodyIndexA: 0, rigidBodyIndexB: 343 })
-    ]);
-    expect(backend.debugPhysicsContactsForRigidBodyRange(343, 2)).toHaveLength(1);
-
-    const populatedCalls = fake.contactCalls.filter(({ outContacts }) => outContacts !== 0);
-    expect(populatedCalls).toHaveLength(2);
-    expect(populatedCalls[0]?.capacity).toBe(contactCount);
-    expect(populatedCalls[1]?.outContacts).toBe(populatedCalls[0]?.outContacts);
+  it("validates both range arguments before collecting contacts", () => {
+    const fake = makeFakeModule();
+    const backend = createCustomBulletMmdPhysicsBackend(fake.module);
+    expect(backend.debugPhysicsContactsForRigidBodyRange(3, 0)).toEqual([]);
+    for (const invalid of [-1, 0.5, NaN, Infinity]) {
+      expect(() => backend.debugPhysicsContactsForRigidBodyRange(invalid, 0)).toThrow(RangeError);
+      expect(() => backend.debugPhysicsContactsForRigidBodyRange(0, invalid)).toThrow(RangeError);
+    }
+    expect(fake.contactCalls).toEqual([]);
+    backend.dispose();
   });
 
   it("reads selected centres in caller order and distinguishes a seed from a world step", () => {
@@ -195,19 +194,25 @@ describe("mmd-anim Bullet physics backend", () => {
     const backend = createCustomBulletMmdPhysicsBackend(fake.module, {
       onStepWork: (feed, step, outputs, seed) => work.push([feed, step, outputs, Number(seed)])
     });
-    const rigidBodies = [[0, 2, 0], [4, 5, 6]].map((xyz, index) => ({ index, motionType: "static" as const,
-      shape: { type: "sphere" as const, size: [1, 1, 1] as const }, localTranslation: xyz as [number, number, number] }));
-    const context = { seconds: 0, frame: 0, frameRate: 30, deltaSeconds: 1/60, rigidBodies };
-    backend.step({...context, seeking:true});
+    const positions: [number, number, number][] = [[0, 2, 0], [4, 5, 6]];
+    const rigidBodies = positions.map((localTranslation, index) => ({
+      index,
+      motionType: "static" as const,
+      shape: { type: "sphere" as const, size: [1, 1, 1] as const },
+      localTranslation
+    }));
+    const context = { seconds: 0, frame: 0, frameRate: 30, deltaSeconds: 1 / 60, rigidBodies };
+    backend.step({ ...context, seeking: true });
     backend.step(context);
     expect(work.map(parts => parts[3])).toEqual([1, 0]);
     expect(work[0][1]).toBe(0);
     expect(work.flat().every(n => Number.isFinite(n) && n >= 0)).toBe(true);
+
     const out = new Float32Array(6);
     expect(backend.readRigidBodyCenters([1, 0], out)).toBe(true);
     expect(Array.from(out)).toEqual([4, 5, 6, 0, 2, 0]);
     expect(backend.readRigidBodyCenters([0, 1], out.subarray(0, 3))).toBe(false);
-    backend.dispose?.();
+    backend.dispose();
     expect(backend.readRigidBodyCenters([0], out)).toBe(false);
   });
 

@@ -4,7 +4,9 @@ import { resolve } from "node:path";
 import * as THREE from "three";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MmdAnimRuntime, FallbackCore, MMD_SELF_SHADOW_LAYER, ThreeMmdLoader } from "../../../src/index.js";
+import { MmdAnimRuntime } from "../../../src/runtime/index.js";
+import { FallbackCore } from "../../../src/parser/index.js";
+import { MMD_SELF_SHADOW_LAYER, ThreeMmdLoader } from "../../../src/index.js";
 import type {
   MmdAnimation,
   MmdCore,
@@ -14,7 +16,7 @@ import type {
   ThreeMmdLoaderOptions,
   ThreeMmdTextureLoader
 } from "../../../src/index.js";
-import * as Textures from "../../../src/three/textures.js";
+import * as Textures from "../../../src/three/texture-alpha.js";
 import { syncMorphSplitTargetInfluences } from "../../../src/runtime/morphSplitSync.js";
 
 describe("ThreeMmdLoader", () => {
@@ -86,6 +88,14 @@ describe("ThreeMmdLoader", () => {
       ...model.outlineMeshes
     ]);
     expect(model.mesh.skeleton.bones).toHaveLength(1);
+    expect(model.metadata).toBe(model.mesh.userData.mmdModel.metadata);
+    expect(model.bones).toBe(model.mesh.userData.mmdModel.bones);
+    expect(model.bones).toHaveLength(1);
+    expect(model.bones[0]?.name).toBe(model.mesh.skeleton.bones[0]?.userData.mmdBoneName);
+    expect(model.rigidBodies).toBe(model.mesh.userData.mmdPhysics.rigidBodies);
+    expect(model.joints).toBe(model.mesh.userData.mmdPhysics.joints);
+    expect(model.rigidBodies).toHaveLength(model.metadata.counts.rigidBodies);
+    expect(model.joints).toHaveLength(model.metadata.counts.joints);
     expect(model.mesh.geometry.getAttribute("position").count).toBe(14);
     expect(model.mesh.geometry.index?.count).toBe(36);
     expect(model.source).toEqual({ kind: "bytes", byteLength: source.byteLength });

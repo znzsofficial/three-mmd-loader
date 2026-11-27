@@ -58,6 +58,10 @@ export interface MmdAnimBulletPhysicsBackend extends MmdPhysicsBackend {
   readRigidBodyCenters(indices: readonly number[], out: Float32Array): boolean;
   debugContactCount(): number;
   debugPhysicsContacts(): readonly MmdAnimBulletContactPoint[];
+  /**
+   * Returns contacts where either world rigid body index is in [firstRigidBodyIndex, firstRigidBodyIndex + rigidBodyCount).
+   * This debug API writes all native contacts to the buffer and materializes only matches in JS.
+   */
   debugPhysicsContactsForRigidBodyRange(firstRigidBodyIndex: number, rigidBodyCount: number): readonly MmdAnimBulletContactPoint[];
 }
 
@@ -201,14 +205,19 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
   }
 
   debugPhysicsContacts(): readonly MmdAnimBulletContactPoint[] {
-    return this.collectPhysicsContacts(0, undefined);
+    return this.readContacts(-Infinity, Infinity);
   }
 
   debugPhysicsContactsForRigidBodyRange(firstRigidBodyIndex: number, rigidBodyCount: number): readonly MmdAnimBulletContactPoint[] {
-    return this.collectPhysicsContacts(firstRigidBodyIndex, rigidBodyCount);
+    if (!Number.isInteger(firstRigidBodyIndex) || firstRigidBodyIndex < 0 ||
+        !Number.isInteger(rigidBodyCount) || rigidBodyCount < 0) {
+      throw new RangeError("firstRigidBodyIndex and rigidBodyCount must be non-negative integers");
+    }
+    if (rigidBodyCount === 0) return [];
+    return this.readContacts(firstRigidBodyIndex, firstRigidBodyIndex + rigidBodyCount);
   }
 
-  private collectPhysicsContacts(firstRigidBodyIndex: number, rigidBodyCount: number | undefined): readonly MmdAnimBulletContactPoint[] {
+  private readContacts(first: number, end: number): readonly MmdAnimBulletContactPoint[] {
     const collect = this.module._mmd_anim_bullet_world_collect_contacts;
     const count = this.debugContactCount();
     if (!collect || count <= 0) return [];
@@ -227,15 +236,12 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
       this.contactBufferCapacity
     );
     const contacts: MmdAnimBulletContactPoint[] = [];
-    const rangeEnd = firstRigidBodyIndex + (rigidBodyCount ?? 0);
     for (let index = 0; index < written; index += 1) {
       const base = (this.contactBufferPointer + index * CONTACT_POINT_BYTES) >>> 2;
       const rigidBodyIndexA = heapI32[base] ?? -1;
       const rigidBodyIndexB = heapI32[base + 1] ?? -1;
-      if (rigidBodyCount !== undefined && !(
-        (rigidBodyIndexA >= firstRigidBodyIndex && rigidBodyIndexA < rangeEnd) ||
-        (rigidBodyIndexB >= firstRigidBodyIndex && rigidBodyIndexB < rangeEnd)
-      )) continue;
+      if ((rigidBodyIndexA < first || rigidBodyIndexA >= end) &&
+          (rigidBodyIndexB < first || rigidBodyIndexB >= end)) continue;
       contacts.push({
         rigidBodyIndexA,
         rigidBodyIndexB,

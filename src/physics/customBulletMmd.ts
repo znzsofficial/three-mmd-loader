@@ -36,6 +36,10 @@ export interface CustomBulletMmdPhysicsBackend extends MmdDirectBufferPhysicsBac
   readRigidBodyCenters(indices: readonly number[], out: Float32Array): boolean;
   debugContactCount(): number;
   debugPhysicsContacts(): readonly MmdAnimBulletContactPoint[];
+  /**
+   * Returns contacts where either world rigid body index is in [firstRigidBodyIndex, firstRigidBodyIndex + rigidBodyCount).
+   * This debug API writes all native contacts to the buffer and materializes only matches in JS.
+   */
   debugPhysicsContactsForRigidBodyRange(firstRigidBodyIndex: number, rigidBodyCount: number): readonly MmdAnimBulletContactPoint[];
 }
 

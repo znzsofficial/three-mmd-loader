@@ -81,7 +81,7 @@ export interface MmdRuntime {
    * The returned state is volatile and may be reused by later evaluate / tick /
    * seek / reset calls.
    */
-  cameraState(): import("../parser/model/modelTypes.js").CameraState | undefined;
+  cameraState(): import("../parser/model/modelTypes.js").MmdCameraState | undefined;
 
   /**
    * Returns the current VMD light state when the assigned animation has light frames.
@@ -89,7 +89,7 @@ export interface MmdRuntime {
    * The returned state is volatile and may be reused by later evaluate / tick /
    * seek / reset calls.
    */
-  lightState(): import("../parser/model/modelTypes.js").LightState | undefined;
+  lightState(): import("../parser/model/modelTypes.js").MmdLightState | undefined;
 
   /**
    * @deprecated Prefer seek / resetPose / clearAnimation for finer control.
@@ -130,7 +130,7 @@ export interface MmdRuntimeAsyncTickOptions extends MmdRuntimeTickOptions {
   readonly signal?: AbortSignal;
 }
 
-export interface DefaultMmdRuntimeOptions {
+export interface MmdRuntimeOptions {
   /** JS runtime only: false skips copying the intermediate debugging snapshots. */
   readonly captureStageSnapshots?: boolean;
   /** Defer intermediate matrix propagation to the external physics barrier when snapshots are off. */
@@ -250,3 +250,6 @@ export type RuntimeMorph = Pick<
   readonly boneOffsets?: readonly RuntimeBoneMorphOffset[];
   readonly impulseOffsets?: readonly RuntimeExternalMorphImpulse[];
 };
+
+/** @deprecated Use MmdRuntimeOptions. */
+export type DefaultMmdRuntimeOptions = MmdRuntimeOptions;
