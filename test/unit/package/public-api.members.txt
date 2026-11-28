@@ -2150,7 +2150,7 @@ interface ThreeMmdVertexMorphOffset
 function appendMmdTslOutlineGroups
   (mesh: Mesh<BufferGeometry<NormalBufferAttributes, BufferGeometryEventMap>, Material<MaterialEventMap> | Material<MaterialEventMap>[], Object3DEventMap>, options?: MmdTslMaterialAssemblyOptions): number
 function computeMmdTslSparsePositionMorphs
-  (renderer: MmdWebGpuRenderer, mesh: SkinnedMesh<BufferGeometry<NormalBufferAttributes, BufferGeometryEventMap>, Material<MaterialEventMap> | Material<MaterialEventMap>[], Object3DEventMap>): boolean
+  (renderer: MmdWebGpuRenderer, mesh: SkinnedMesh<BufferGeometry<NormalBufferAttributes, BufferGeometryEventMap>, Material<MaterialEventMap> | Material<MaterialEventMap>[], Object3DEventMap>, reuseOutputs?: boolean): boolean
 function createMmdTslBaseColorNode
   (options?: MmdTslMaterialCoreOptions & { readonly uniforms?: MmdTslMaterialUniforms | undefined; }): VarNode<"vec3", JoinNode<"vec3">>
 function createMmdTslMaterialFromSource
@@ -2175,6 +2175,8 @@ function disposeMmdTslSparsePositionMorphs
   (mesh: SkinnedMesh<BufferGeometry<NormalBufferAttributes, BufferGeometryEventMap>, Material<MaterialEventMap> | Material<MaterialEventMap>[], Object3DEventMap>): boolean
 function enableMmdTslSparsePositionMorphs
   (mesh: SkinnedMesh<BufferGeometry<NormalBufferAttributes, BufferGeometryEventMap>, Material<MaterialEventMap> | Material<MaterialEventMap>[], Object3DEventMap>): boolean
+function invalidateMmdTslSparseMorphOutputs
+  (mesh: SkinnedMesh<BufferGeometry<NormalBufferAttributes, BufferGeometryEventMap>, Material<MaterialEventMap> | Material<MaterialEventMap>[], Object3DEventMap>): void
 const MMD_TSL_DEFAULT_LIGHT_COLOR
   : number
 const MMD_TSL_DEFAULT_TOON_COORD_OFFSET
@@ -2240,6 +2242,7 @@ interface MmdTslPipeline
   setSelfShadowMode(mode: 0 | 2 | 1): boolean
 interface MmdTslPipelineAttachOptions
   readonly light?: DirectionalLight | undefined
+  readonly reuseSparseMorphOutputs?: boolean | undefined
   readonly selfShadow?: boolean | undefined  @deprecated
   readonly selfShadowEnabled?: boolean | undefined
   readonly sparseMorphs?: boolean | undefined
@@ -2259,7 +2262,7 @@ interface MmdTslSelfShadowDebugState
   readonly passReady: boolean
   readonly receiverUniformCount: number
 interface MmdWebGpuRenderer
-  readonly backend?: { readonly isWebGPUBackend?: boolean | undefined; } | undefined
+  readonly backend?: { readonly isWebGPUBackend?: boolean | undefined; readonly device?: object | undefined; get?(attribute: BufferAttribute<BufferAttributeEventMap>): { readonly buffer?: object | undefined; } | undefined; } | undefined
   compute(node: Node | Node[]): Promise<void> | undefined
 function replaceMmdModelMaterialsWithTsl
   (mesh: Mesh<BufferGeometry<NormalBufferAttributes, BufferGeometryEventMap>, Material<MaterialEventMap> | Material<MaterialEventMap>[], Object3DEventMap>, options?: MmdTslMaterialAssemblyOptions): void
