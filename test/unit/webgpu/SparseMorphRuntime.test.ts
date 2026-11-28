@@ -5,7 +5,8 @@ import { createThreeBufferGeometry } from "../../../src/three/geometry.js";
 import {
   computeMmdTslSparsePositionMorphs,
   disposeMmdTslSparsePositionMorphs,
-  enableMmdTslSparsePositionMorphs
+  enableMmdTslSparsePositionMorphs,
+  invalidateMmdTslSparseMorphOutputs
 } from "../../../src/webgpu/sparse-morph-runtime.js";
 
 describe("sparse position morph runtime", () => {
@@ -13,7 +14,7 @@ describe("sparse position morph runtime", () => {
     const mesh = createMesh();
     const densePositionMorphs = mesh.geometry.morphAttributes.position;
 
-    expect(densePositionMorphs).toHaveLength(2);
+    expect(densePositionMorphs).toHaveLength(3);
     expect(enableMmdTslSparsePositionMorphs(mesh)).toBe(true);
     expect(enableMmdTslSparsePositionMorphs(mesh)).toBe(true);
     expect(mesh.geometry.morphAttributes.position).toEqual([]);
@@ -52,6 +53,79 @@ describe("sparse position morph runtime", () => {
         mesh
       )
     ).toThrow("MMD_TSL_SPARSE_POSITION_MORPH_REQUIRES_WEBGPU");
+  });
+
+  it("retains a complete group per mesh only on opt-in and compares the weights as Float32", () => {
+    const render = recordingRenderer();
+    const a = createMesh(), b = createMesh();
+    enableMmdTslSparsePositionMorphs(a);
+    enableMmdTslSparsePositionMorphs(b);
+    for (let frame = 0; frame < 240; frame++) {
+      computeMmdTslSparsePositionMorphs(render, a);
+      computeMmdTslSparsePositionMorphs(render, b, true);
+    }
+    expect(render.compute).toHaveBeenCalledTimes(241);
+    for (const weight of [0.5, 1, 0]) {
+      b.morphTargetInfluences = [0, weight];
+      expect(computeMmdTslSparsePositionMorphs(render, b, true)).toBe(true);
+      b.morphTargetInfluences = [0, weight + (weight === 0 ? 0 : 1e-12)];
+      expect(computeMmdTslSparsePositionMorphs(render, b, true)).toBe(false);
+    }
+    // An independent UV-only morph still rebuilds every channel together.
+    b.morphTargetInfluences = [0, 0, 1];
+    expect(computeMmdTslSparsePositionMorphs(render, b, true)).toBe(true);
+    expect(render.compute.mock.lastCall?.[0]).toHaveLength(3);
+    expect(computeMmdTslSparsePositionMorphs(render, a, true)).toBe(true);
+    for (let write = 0; write < 4; write++) {
+      invalidateMmdTslSparseMorphOutputs(b);
+      expect(computeMmdTslSparsePositionMorphs(render, b, true)).toBe(true);
+      expect(computeMmdTslSparsePositionMorphs(render, a, true)).toBe(false);
+    }
+    expect(computeMmdTslSparsePositionMorphs(render, b, true)).toBe(false);
+    disposeMmdTslSparsePositionMorphs(b);
+    enableMmdTslSparsePositionMorphs(b);
+    expect(computeMmdTslSparsePositionMorphs(render, b, true)).toBe(true);
+  });
+
+  it("rebuilds on renderer, device, GPU allocation, attribute upload or geometry binding changes", () => {
+    const mesh = createMesh();
+    enableMmdTslSparsePositionMorphs(mesh);
+    const renderer = recordingRenderer();
+    const compute = () => computeMmdTslSparsePositionMorphs(renderer, mesh, true);
+    const uv = mesh.geometry.getAttribute("uv") as THREE.BufferAttribute;
+    expect(compute()).toBe(true);
+    expect(compute()).toBe(false);
+    expect(computeMmdTslSparsePositionMorphs({ ...renderer }, mesh, true)).toBe(true);
+    expect(compute()).toBe(true);
+    renderer.backend.device = {};
+    expect(compute()).toBe(true);
+    renderer.backend.get(uv).buffer = {};
+    expect(compute()).toBe(true);
+    uv.needsUpdate = true;
+    expect(compute()).toBe(true);
+    mesh.geometry.setAttribute("uv", uv.clone());
+    expect(compute()).toBe(true);
+    expect(compute()).toBe(true);
+    mesh.geometry.setAttribute("uv", uv);
+    expect(compute()).toBe(true);
+    expect(compute()).toBe(false);
+    const unknown = { ...renderer, backend: { isWebGPUBackend: true } };
+    expect(computeMmdTslSparsePositionMorphs(unknown, mesh, true)).toBe(true);
+    expect(computeMmdTslSparsePositionMorphs(unknown, mesh, true)).toBe(true);
+  });
+
+  it("retries the full group after a failed or asynchronous submission", () => {
+    const mesh = createMesh(), renderer = recordingRenderer();
+    enableMmdTslSparsePositionMorphs(mesh);
+    const compute = () => computeMmdTslSparsePositionMorphs(renderer, mesh, true);
+    expect(compute()).toBe(true);
+    mesh.morphTargetInfluences = [0.5, 0, 0];
+    renderer.compute.mockImplementationOnce(() => { throw Error("submit"); });
+    expect(compute).toThrow("submit");
+    renderer.compute.mockReturnValueOnce(Promise.resolve());
+    expect(compute()).toBe(true);
+    expect(compute()).toBe(true);
+    expect(compute()).toBe(false);
   });
 
   it("restores original attributes and morph attributes through idempotent cleanup", () => {
@@ -127,6 +201,23 @@ describe("sparse position morph runtime", () => {
   });
 });
 
+function recordingRenderer() {
+  const buffers = new WeakMap<THREE.BufferAttribute, {buffer: object}>();
+  return {
+    backend: {
+      isWebGPUBackend: true, device: {},
+      get(attribute: THREE.BufferAttribute) {
+        const found = buffers.get(attribute);
+        if (found) return found;
+        const allocation = {buffer: {}};
+        buffers.set(attribute, allocation);
+        return allocation;
+      }
+    },
+    compute: vi.fn<(node: THREE.Node | THREE.Node[]) => Promise<void> | undefined>()
+  };
+}
+
 function createMesh(): THREE.SkinnedMesh {
   const geometry = createThreeBufferGeometry(createBuffers(), [], [
     {
@@ -134,10 +225,11 @@ function createMesh(): THREE.SkinnedMesh {
       uvOffsets: [{ vertexIndex: 0, uv: [0.1, 0.2] }],
       additionalUvOffsets: [{ vertexIndex: 0, uvIndex: 0, uv: [0.1, 0.2, 0.3, 0.4] }]
     },
-    { vertexOffsets: [{ vertexIndex: 2, position: [0, 0.25, 0] }] }
+    { vertexOffsets: [{ vertexIndex: 2, position: [0, 0.25, 0] }] },
+    { uvOffsets: [{ vertexIndex: 2, uv: [0.25, 0.5] }] }
   ]);
   const mesh = new THREE.SkinnedMesh(geometry, new THREE.MeshBasicNodeMaterial());
-  mesh.morphTargetInfluences = [0, 0];
+  mesh.morphTargetInfluences = [0, 0, 0];
   return mesh;
 }
 

@@ -30,7 +30,8 @@ export type { MmdWebGpuRenderer } from "./sparse-morph-runtime.js";
 export {
   computeMmdTslSparsePositionMorphs,
   disposeMmdTslSparsePositionMorphs,
-  enableMmdTslSparsePositionMorphs
+  enableMmdTslSparsePositionMorphs,
+  invalidateMmdTslSparseMorphOutputs
 } from "./sparse-morph-runtime.js";
 
 export { createMmdTslModelLoadOptions, createMmdTslPipeline, createModelLoadOptions } from "./pipeline.js";

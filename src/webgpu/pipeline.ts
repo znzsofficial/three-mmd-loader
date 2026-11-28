@@ -18,7 +18,8 @@ import {
 import {
   computeMmdTslSparsePositionMorphs,
   disposeMmdTslSparsePositionMorphs,
-  enableMmdTslSparsePositionMorphs
+  enableMmdTslSparsePositionMorphs,
+  type MmdWebGpuRenderer
 } from "./sparse-morph-runtime.js";
 import {
   createMmdTslShadowCaster,
@@ -45,6 +46,9 @@ export interface MmdTslPipelineAttachOptions {
   readonly light?: THREE.DirectionalLight;
   /** Backgrounds can opt out of the sparse position-morph compute path. */
   readonly sparseMorphs?: boolean;
+  /** Skip unchanged sparse compute groups for this mesh only. External GPU
+   * writers must invalidateMmdTslSparseMorphOutputs(mesh) before writing. */
+  readonly reuseSparseMorphOutputs?: boolean;
   readonly selfShadowEnabled?: boolean;
   /** @deprecated Use selfShadowEnabled. Will be removed in 1.0.0. */
   readonly selfShadow?: boolean;
@@ -96,6 +100,7 @@ interface MmdTslAttachedModel {
   readonly uniforms: MmdTslMaterialUniforms[];
   readonly receiverUniforms: MmdTslMaterialUniforms["dedicatedShadowEnabled"][];
   readonly sparseMorphs: boolean;
+  readonly reuseSparseMorphOutputs: boolean;
 }
 
 interface MmdTslPipelineInternal extends MmdTslPipeline {
@@ -287,7 +292,8 @@ function createInitializedPipeline(
         materials,
         uniforms,
         receiverUniforms,
-        sparseMorphs
+        sparseMorphs,
+        reuseSparseMorphOutputs: attachOptions.reuseSparseMorphOutputs === true
       };
       attached.push(state);
       attachedByMesh.set(model.mesh, state);
@@ -324,11 +330,9 @@ function createInitializedPipeline(
         const state = attached[index];
         if (state.sparseMorphs) {
           computeMmdTslSparsePositionMorphs(
-            renderer as unknown as {
-              backend?: { readonly isWebGPUBackend?: boolean };
-              compute(node: THREE.Node | THREE.Node[]): Promise<void> | undefined;
-            },
-            state.model.mesh
+            renderer as unknown as MmdWebGpuRenderer,
+            state.model.mesh,
+            state.reuseSparseMorphOutputs
           );
         }
         syncMaterialStates(state);

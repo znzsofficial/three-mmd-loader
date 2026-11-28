@@ -1,4 +1,5 @@
 import type * as THREE from "three/webgpu";
+import { StaticDrawUsage } from "three/webgpu";
 import * as TSL from "three/tsl";
 
 import { getMmdGeometryMorphSource } from "../three/internal-morph-source.js";
@@ -14,6 +15,8 @@ interface MmdSparsePositionMorphState {
   readonly weightsAttributes: THREE.BufferAttribute[];
   readonly storageAttributes: THREE.BufferAttribute[];
   readonly replacedAttributes: MmdSparseMorphAttributeState[];
+  lastRenderer?: MmdWebGpuRenderer;
+  lastDevice?: object;
 }
 
 interface MmdSparseMorphAttributeState {
@@ -21,10 +24,17 @@ interface MmdSparseMorphAttributeState {
   readonly attribute: THREE.BufferAttribute;
   readonly morphAttributes: THREE.BufferAttribute[] | undefined;
   readonly hadMorphAttributes: boolean;
+  readonly output: THREE.BufferAttribute;
+  lastBuffer?: object;
+  lastVersion?: number;
 }
 
 export interface MmdWebGpuRenderer {
-  readonly backend?: { readonly isWebGPUBackend?: boolean };
+  readonly backend?: {
+    readonly isWebGPUBackend?: boolean;
+    readonly device?: object;
+    get?(attribute: THREE.BufferAttribute): { readonly buffer?: object } | undefined;
+  };
   compute(node: THREE.Node | THREE.Node[]): Promise<void> | undefined;
 }
 
@@ -51,7 +61,8 @@ export function enableMmdTslSparsePositionMorphs(mesh: THREE.SkinnedMesh): boole
   const packedPosition = packMmdPositionMorphsToVertexCsr(vertexCount, morphs);
   if (packedPosition.morphIndices.length > 0) {
     const output = createSparseMorphCompute(position as THREE.BufferAttribute, packedPosition, weights, "vec3");
-    replacedAttributes.push(captureSparseMorphAttribute(mesh.geometry, "position", position as THREE.BufferAttribute));
+    output.computeNode.name = "MMD sparse morph: position";
+    replacedAttributes.push(captureSparseMorphAttribute(mesh.geometry, "position", position as THREE.BufferAttribute, output.attribute));
     mesh.geometry.setAttribute("position", output.attribute);
     mesh.geometry.morphAttributes.position = [];
     computeNodes.push(output.computeNode);
@@ -136,10 +147,28 @@ export function disposeMmdTslSparsePositionMorphs(mesh: THREE.SkinnedMesh): bool
   return true;
 }
 
-/** @experimental */
+/** Invalidate before an external GPU write to any of this mesh's sparse outputs.
+ * GPU writes do not advance BufferAttribute.version. The next compute restores
+ * every output, even if the final write was made by a now-retired display layer.
+ * @experimental */
+export function invalidateMmdTslSparseMorphOutputs(mesh: THREE.SkinnedMesh): void {
+  const state = sparsePositionMorphStates.get(mesh);
+  if (state) state.lastRenderer = undefined;
+}
+
+// The GPU allocation may have been retired/recreated underneath the very same
+// BufferAttribute. If the backend cannot identify it, never retain a result.
+function outputBuffer(renderer: MmdWebGpuRenderer, mesh: THREE.SkinnedMesh, slot: MmdSparseMorphAttributeState): object | undefined {
+  if (mesh.geometry.getAttribute(slot.name) !== slot.output || slot.output.usage !== StaticDrawUsage) return undefined;
+  return renderer.backend?.get?.(slot.output)?.buffer;
+}
+
+/** Returns true if a compute group was submitted; reuse is opt-in and requires
+ * external writers to call invalidateMmdTslSparseMorphOutputs(). @experimental */
 export function computeMmdTslSparsePositionMorphs(
   renderer: MmdWebGpuRenderer,
-  mesh: THREE.SkinnedMesh
+  mesh: THREE.SkinnedMesh,
+  reuseOutputs = false
 ): boolean {
   const state = sparsePositionMorphStates.get(mesh);
   if (!state) {
@@ -149,6 +178,13 @@ export function computeMmdTslSparsePositionMorphs(
     throw new Error("MMD_TSL_SPARSE_POSITION_MORPH_REQUIRES_WEBGPU");
   }
   const influences = mesh.morphTargetInfluences;
+  if (reuseOutputs && state.lastRenderer === renderer && state.lastDevice === renderer.backend.device &&
+      state.weights.every((value, i) => Object.is(value, Math.fround(influences?.[i] ?? 0))) &&
+      state.replacedAttributes.every(slot => slot.lastVersion === slot.output.version && slot.lastBuffer !== undefined &&
+        slot.lastBuffer === outputBuffer(renderer, mesh, slot))) {
+    return false;
+  }
+  state.lastRenderer = undefined; // A throw or an asynchronous submission cannot establish a clean output.
   for (let index = 0; index < state.weights.length; index += 1) {
     state.weights[index] = influences?.[index] ?? 0;
   }
@@ -156,7 +192,15 @@ export function computeMmdTslSparsePositionMorphs(
     attribute.needsUpdate = true;
   }
   const onlyComputeNode = state.computeNodes[0];
-  renderer.compute(state.computeNodes.length === 1 && onlyComputeNode ? onlyComputeNode : state.computeNodes);
+  const pending = renderer.compute(state.computeNodes.length === 1 && onlyComputeNode ? onlyComputeNode : state.computeNodes);
+  if (reuseOutputs && !pending && renderer.backend.device) {
+    for (const slot of state.replacedAttributes) {
+      slot.lastBuffer = outputBuffer(renderer, mesh, slot);
+      slot.lastVersion = slot.output.version;
+    }
+    state.lastDevice = renderer.backend.device;
+    state.lastRenderer = renderer;
+  }
   return true;
 }
 
@@ -174,7 +218,8 @@ function appendUvCompute(
   if (packed.morphIndices.length === 0) return;
   const nodeType = base.itemSize === 2 ? "vec2" : "vec4";
   const output = createSparseMorphCompute(base, packed, weights, nodeType);
-  replacedAttributes.push(captureSparseMorphAttribute(geometry, attributeName, base));
+  output.computeNode.name = `MMD sparse morph: ${attributeName}`;
+  replacedAttributes.push(captureSparseMorphAttribute(geometry, attributeName, base, output.attribute));
   geometry.setAttribute(attributeName, output.attribute);
   (geometry.morphAttributes as Record<string, THREE.BufferAttribute[]>)[attributeName] = [];
   computeNodes.push(output.computeNode);
@@ -185,11 +230,13 @@ function appendUvCompute(
 function captureSparseMorphAttribute(
   geometry: THREE.BufferGeometry,
   name: string,
-  attribute: THREE.BufferAttribute
+  attribute: THREE.BufferAttribute,
+  output: THREE.BufferAttribute
 ): MmdSparseMorphAttributeState {
   return {
     name,
     attribute,
+    output,
     morphAttributes: (geometry.morphAttributes as Record<string, THREE.BufferAttribute[]>)[name],
     hadMorphAttributes: Object.prototype.hasOwnProperty.call(geometry.morphAttributes, name)
   };
