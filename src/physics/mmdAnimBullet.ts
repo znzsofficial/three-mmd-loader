@@ -197,9 +197,14 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
   }
 
   debugContactCount(): number {
+    return this.collectContacts(0, 0);
+  }
+
+  // The C API always reports the total, even if only a prefix fits.
+  private collectContacts(pointer: number, capacity: number): number {
     const collect = this.module._mmd_anim_bullet_world_collect_contacts;
     if (this.disposedState || !collect) return 0;
-    if (collect(this.world, 0, 0, this.contactCountPointer) !== 0) return 0;
+    if (collect(this.world, pointer, capacity, this.contactCountPointer) !== 0) return 0;
     this.module.refreshMemoryViews?.();
     return this.module.HEAPU32?.[this.contactCountPointer >>> 2] ?? 0;
   }
@@ -218,23 +223,20 @@ class MmdAnimBulletPhysicsBackendImpl implements MmdAnimBulletPhysicsBackend {
   }
 
   private readContacts(first: number, end: number): readonly MmdAnimBulletContactPoint[] {
-    const collect = this.module._mmd_anim_bullet_world_collect_contacts;
-    const count = this.debugContactCount();
-    if (!collect || count <= 0) return [];
+    let count = this.collectContacts(this.contactBufferPointer, this.contactBufferCapacity);
     if (count > this.contactBufferCapacity) {
+      const pointer = this.module._malloc(count * CONTACT_POINT_BYTES);
+      if (!pointer) return [];
       if (this.contactBufferPointer !== 0) this.module._free(this.contactBufferPointer);
-      this.contactBufferPointer = this.module._malloc(count * CONTACT_POINT_BYTES);
+      this.contactBufferPointer = pointer;
       this.contactBufferCapacity = count;
+      count = this.collectContacts(pointer, count);
     }
-    if (collect(this.world, this.contactBufferPointer, this.contactBufferCapacity, this.contactCountPointer) !== 0) return [];
-    this.module.refreshMemoryViews?.();
+    if (!count) return [];
     const heap = this.module.HEAPF32;
     if (!heap) return [];
     const heapI32 = new Int32Array(heap.buffer);
-    const written = Math.min(
-      this.module.HEAPU32?.[this.contactCountPointer >>> 2] ?? 0,
-      this.contactBufferCapacity
-    );
+    const written = Math.min(count, this.contactBufferCapacity);
     const contacts: MmdAnimBulletContactPoint[] = [];
     for (let index = 0; index < written; index += 1) {
       const base = (this.contactBufferPointer + index * CONTACT_POINT_BYTES) >>> 2;

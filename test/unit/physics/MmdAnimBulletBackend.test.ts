@@ -138,7 +138,6 @@ describe("mmd-anim Bullet physics backend", () => {
       { outContacts: 0, capacity: 0 },
       { outContacts: 0, capacity: 0 },
       expect.objectContaining({ capacity: 1 }),
-      { outContacts: 0, capacity: 0 },
       expect.objectContaining({ capacity: 1 })
     ]);
 
@@ -173,6 +172,11 @@ describe("mmd-anim Bullet physics backend", () => {
     expect(writes).toHaveLength(3);
     expect(writes[1]?.outContacts).toBe(writes[0]?.outContacts);
     expect(writes[2]?.outContacts).toBe(writes[0]?.outContacts);
+    fake.setContactCount(0);
+    expect(backend.debugPhysicsContacts()).toEqual([]);
+    fake.setContactCount(1);
+    expect(backend.debugPhysicsContacts()).toHaveLength(1);
+    expect(fake.contactCalls.map(call => call.capacity)).toEqual([0, 1, 1, 600, 600, 600, 600, 600]);
     backend.dispose();
   });
 
